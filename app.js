@@ -276,25 +276,27 @@ app.use(
 // Route alternative pour accéder aux logos d'entrepôts directement
 app.use("/warehouses", express.static("uploads/warehouses"));
 
-// Servir les fichiers statiques React (build de production)
-app.use(express.static(path.join(__dirname, "build")));
-
-// Gérer toutes les routes non-API en servant index.html (pour SPA React Router)
-app.get("*", (req, res) => {
-  // Ne pas intercepter les routes API et uploads
-  if (
-    req.path.startsWith("/api/") ||
-    req.path.startsWith("/uploads/") ||
-    req.path.startsWith("/warehouses/")
-  ) {
-    return res.status(404).json({ message: "Route non trouvée" });
-  }
-
-  // Pour toutes les autres routes, servir index.html pour permettre à React Router de prendre le relais
-  res.sendFile(path.join(__dirname, "build", "index.html"));
+// Route de santé pour vérifier que l'API fonctionne
+app.get("/", (req, res) => {
+  res.json({
+    message: "API Gestion Produits - Backend en ligne",
+    version: "1.0.0",
+    status: "healthy",
+  });
 });
 
-const PORT = 3000;
+// Route pour les API non trouvées
+app.use("/api/*", (req, res) => {
+  res.status(404).json({ message: "Route API non trouvée" });
+});
+
+// Middleware pour toutes les autres routes
+app.get("*", (req, res) => {
+  res.status(404).json({ message: "Route non trouvée" });
+});
+
+// Configuration du port pour le déploiement
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Votre Serveur a démarré sur http://localhost:${PORT}`);
+  console.log(`Backend API démarré sur le port ${PORT}`);
 });
