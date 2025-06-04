@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "prod": "cross-env NODE_ENV=production node app.js"
+    "prod": "cross-env NODE_ENV=production node app.js",
+    "test-db": "node test-connection.js",
+    "diagnostic": "node diagnostic-connexion.js",
+    "health": "node -e \"console.log('Node.js version:', process.version); console.log('Environment variables OK:', !!process.env.DATABASE_URL);\""
   },
   "dependencies": {
     "archiver": "^5.3.2",

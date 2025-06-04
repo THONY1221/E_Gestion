@@ -297,6 +297,36 @@ app.get("*", (req, res) => {
 
 // Configuration du port pour le déploiement
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Backend API démarré sur le port ${PORT}`);
+
+// Test de connexion à la base de données au démarrage
+const initializeApp = async () => {
+  console.log("🚀 Initialisation de l'application...");
+
+  // Tester la connexion à la base de données
+  const connectionSuccess = await db.testConnection();
+
+  if (!connectionSuccess) {
+    console.error(
+      "💥 ERREUR CRITIQUE: Impossible de se connecter à la base de données"
+    );
+    console.error(
+      "🔧 Vérifiez votre configuration DATABASE_URL dans les variables d'environnement"
+    );
+    process.exit(1);
+  }
+
+  // Démarrer le serveur seulement si la connexion DB est OK
+  app.listen(PORT, () => {
+    console.log(`✅ Backend API démarré avec succès sur le port ${PORT}`);
+    console.log(
+      `🌐 URL: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`}`
+    );
+    console.log(`🗄️  Base de données: Supabase PostgreSQL connectée`);
+  });
+};
+
+// Initialiser l'application
+initializeApp().catch((error) => {
+  console.error("💥 Erreur lors de l'initialisation:", error);
+  process.exit(1);
 });

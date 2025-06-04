@@ -1,34 +1,69 @@
 const { Pool } = require("pg");
 require("dotenv").config();
 
-// Configuration PostgreSQL pour Supabase
+// Configuration PostgreSQL pour Supabase - CONNEXION DIRECTE
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || process.env.SUPABASE_DB_URL,
   ssl: {
     rejectUnauthorized: false,
   },
+  // Configuration optimisée pour Supabase
+  max: 20, // Nombre maximum de connexions dans le pool
+  idleTimeoutMillis: 30000, // Fermer les connexions inactives après 30s
+  connectionTimeoutMillis: 10000, // Timeout de connexion de 10s
+  // Configuration supplémentaire pour résoudre les problèmes de connexion
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
-// Alternative configuration avec paramètres séparés
+// Alternative configuration avec paramètres séparés - CONNEXION DIRECTE
 const poolWithParams = new Pool({
   host: process.env.DB_HOST || "db.oalzqdjcxgeigggkgfszv.supabase.co",
-  port: process.env.DB_PORT || 5432,
+  port: parseInt(process.env.DB_PORT) || 5432,
   user: process.env.DB_USER || "postgres",
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || "postgres",
   ssl: {
     rejectUnauthorized: false,
   },
+  // Configuration optimisée
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
-// Fonction pour tester la connexion
+// Fonction pour tester la connexion avec plus de détails
 const testConnection = async () => {
   try {
+    console.log("🔄 Test de connexion à Supabase...");
+    console.log("📋 Configuration utilisée:");
+    console.log(
+      `   - Host: ${
+        process.env.DB_HOST || "db.oalzqdjcxgeigggkgfszv.supabase.co"
+      }`
+    );
+    console.log(`   - Port: ${process.env.DB_PORT || 5432}`);
+    console.log(`   - Database: ${process.env.DB_NAME || "postgres"}`);
+    console.log(`   - User: ${process.env.DB_USER || "postgres"}`);
+
     const client = await pool.connect();
+
+    // Tester une requête simple
+    const result = await client.query(
+      "SELECT NOW() as current_time, version() as db_version"
+    );
     console.log("✅ Connexion PostgreSQL/Supabase réussie");
+    console.log(`📅 Heure serveur: ${result.rows[0].current_time}`);
+    console.log(`🗄️  Version DB: ${result.rows[0].db_version.split(" ")[0]}`);
+
     client.release();
+    return true;
   } catch (error) {
-    console.error("❌ Erreur de connexion PostgreSQL:", error);
+    console.error("❌ Erreur de connexion PostgreSQL:");
+    console.error(`   Code: ${error.code || "N/A"}`);
+    console.error(`   Message: ${error.message}`);
+    console.error(`   Détail: ${error.detail || "N/A"}`);
+    return false;
   }
 };
 
