@@ -4,7 +4,7 @@ const cors = require("cors");
 const path = require("path");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const db = require("./config/db");
+const db = require("./config/db-supabase");
 const fs = require("fs"); // Import fs module
 
 // Importation des routes existantes

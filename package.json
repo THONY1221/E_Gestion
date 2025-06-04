@@ -45,6 +45,7 @@
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.16.0",
     "pdfmake": "^0.2.18",
+    "pg": "^8.16.0",
     "phantomjs-prebuilt": "^2.1.16",
     "puppeteer": "^24.7.0",
     "puppeteer-core": "^24.7.0",
