@@ -6,8 +6,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "prod": "cross-env NODE_ENV=production node app.js",
-    "install:all": "npm install"
+    "prod": "cross-env NODE_ENV=production node app.js"
   },
   "dependencies": {
     "archiver": "^5.3.2",
@@ -61,6 +60,6 @@
     "produits",
     "express"
   ],
-  "author": "",
+  "author": "THONY1221",
   "license": "ISC"
 }
