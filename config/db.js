@@ -1,15 +1,3 @@
-const mysql = require("mysql2");
-require("dotenv").config();
-
-// Configuration de la base de données avec variables d'environnement
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "GestionCommerciale",
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-});
-
-module.exports = pool.promise();
+// Redirection vers la configuration Supabase/PostgreSQL
+// Ceci assure la rétrocompatibilité avec les routes existantes
+module.exports = require("./db-supabase");
