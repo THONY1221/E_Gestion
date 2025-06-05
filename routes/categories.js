@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 const path = require("path");
 const multer = require("multer");
-const pool = require("../config/db"); // pool MySQL
+const pool = require("../config/db"); // PostgreSQL via Render
 
 // Configuration de multer pour stocker les images dans "uploads/category_images"
 const storage = multer.diskStorage({

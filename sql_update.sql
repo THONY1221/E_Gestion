@@ -1,2 +1,0 @@
--- SQL statement to add the 'transferred' column to orders table
-ALTER TABLE orders ADD COLUMN transferred VARCHAR(3) NOT NULL DEFAULT 'No' COMMENT 'Indicates if this order represents a completed stock transfer'; 

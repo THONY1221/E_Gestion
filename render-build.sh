@@ -3,6 +3,10 @@
 
 echo "🚀 Début du build pour Render..."
 
+# Diagnostic de configuration
+echo "🔍 Diagnostic de configuration..."
+node diagnostic-render.js || echo "⚠️ Diagnostic échoué, continuons..."
+
 # Installation des dépendances
 echo "📦 Installation des dépendances..."
 npm install
