@@ -44,40 +44,31 @@ const dbWrapper = {
 
 // Fonction de conversion basique MySQL vers PostgreSQL
 function convertMySQLToPostgreSQL(sql) {
-  return (
-    sql
-      // Remplace les backticks par des guillemets doubles
-      .replace(/`([^`]+)`/g, '"$1"')
-      // Remplace LIMIT ? par LIMIT $1, etc.
-      .replace(/\?/g, (match, offset, string) => {
-        const beforeMatch = string.substring(0, offset);
-        const paramCount = (beforeMatch.match(/\$\d+/g) || []).length + 1;
-        return `$${paramCount}`;
-      })
-      // AUTO_INCREMENT vers SERIAL
-      .replace(/AUTO_INCREMENT/gi, "")
-      // BIGINT UNSIGNED vers BIGSERIAL
-      .replace(/bigint\s+unsigned\s+not\s+null\s+auto_increment/gi, "BIGSERIAL")
-      // INT UNSIGNED vers INTEGER
-      .replace(/int\s+unsigned/gi, "INTEGER")
-      .replace(/bigint\s+unsigned/gi, "BIGINT")
-      // TINYINT vers BOOLEAN pour les cas 0/1
-      .replace(/tinyint\(1\)/gi, "BOOLEAN")
-      // VARCHAR(191) vers VARCHAR(191)
-      .replace(/varchar\(191\)/gi, "VARCHAR(191)")
-      // TEXT vers TEXT
-      .replace(/varchar\(1000\)/gi, "TEXT")
-      // DATETIME vers TIMESTAMP
-      .replace(/datetime/gi, "TIMESTAMP")
-      // Gestion des ENGINE et CHARSET (suppression)
-      .replace(/ENGINE=\w+/gi, "")
-      .replace(/DEFAULT CHARSET=\w+/gi, "")
-      .replace(/COLLATE=\w+/gi, "")
-      // ON UPDATE CURRENT_TIMESTAMP
-      .replace(/ON UPDATE CURRENT_TIMESTAMP/gi, "")
-      // CURRENT_TIMESTAMP()
-      .replace(/CURRENT_TIMESTAMP\(\)/gi, "CURRENT_TIMESTAMP")
-  );
+  let convertedSql = sql;
+  let paramIndex = 1;
+
+  // Remplace les backticks par des guillemets doubles pour les noms de colonnes/tables
+  convertedSql = convertedSql.replace(/`([^`]+)`/g, '"$1"');
+
+  // Remplace ? par $1, $2, etc. (paramètres positionnels PostgreSQL)
+  convertedSql = convertedSql.replace(/\?/g, () => `$${paramIndex++}`);
+
+  // Remplace NOW() par CURRENT_TIMESTAMP
+  convertedSql = convertedSql.replace(/NOW\(\)/gi, "CURRENT_TIMESTAMP");
+
+  // Gestion des insertId pour PostgreSQL
+  // PostgreSQL utilise RETURNING id au lieu de insertId
+  if (
+    convertedSql.includes("INSERT INTO") &&
+    !convertedSql.includes("RETURNING")
+  ) {
+    convertedSql = convertedSql.replace(
+      /(INSERT INTO [^)]+\))/,
+      "$1 RETURNING id"
+    );
+  }
+
+  return convertedSql;
 }
 
 module.exports = dbWrapper;
