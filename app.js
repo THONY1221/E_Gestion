@@ -276,6 +276,52 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
+// Route temporaire pour créer l'utilisateur admin
+app.get("/api/create-admin", async (req, res) => {
+  let connection;
+  try {
+    connection = await db.getConnection();
+
+    // Vérifier si l'utilisateur admin existe
+    const [existingUsers] = await connection.query(
+      "SELECT id, email, status FROM users WHERE email = ?",
+      ["admin@elsa-technologies.com"]
+    );
+
+    if (existingUsers.length > 0) {
+      return res.json({
+        message: "Utilisateur admin existe déjà",
+        user: existingUsers[0],
+      });
+    }
+
+    // Créer l'utilisateur admin
+    const hashedPassword = await bcrypt.hash("admin123", 10);
+    const [result] = await connection.query(
+      `INSERT INTO users (name, email, password, status, is_superadmin, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+      ["Admin", "admin@elsa-technologies.com", hashedPassword, "enabled", 1]
+    );
+
+    res.json({
+      message: "Utilisateur admin créé avec succès",
+      userId: result[0]?.id || result.insertId,
+      email: "admin@elsa-technologies.com",
+      password: "admin123",
+    });
+  } catch (error) {
+    console.error("Erreur création admin:", error);
+    res.status(500).json({
+      message: "Erreur lors de la création de l'admin",
+      error: error.message,
+    });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
 // Définition des routes API
 app.use("/api/produits", produitsRoutes);
 app.use("/api/warehouses", warehouseRoutes);
