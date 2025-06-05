@@ -14,6 +14,9 @@ const pool = new Pool({
   // Configuration supplémentaire pour résoudre les problèmes de connexion
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
+  // CORRECTION: Forcer IPv4 pour éviter les problèmes de connexion IPv6 sur Render
+  options: "-c default_transaction_isolation=read_committed",
+  family: 4, // Force IPv4 (4) au lieu d'IPv6 (6)
 });
 
 // Alternative configuration avec paramètres séparés - CONNEXION DIRECTE
@@ -30,6 +33,8 @@ const poolWithParams = new Pool({
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
+  // CORRECTION: Forcer IPv4 pour éviter les problèmes de connexion IPv6 sur Render
+  family: 4, // Force IPv4 (4) au lieu d'IPv6 (6)
 });
 
 // Fonction pour tester la connexion avec plus de détails
