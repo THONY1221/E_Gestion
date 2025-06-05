@@ -312,10 +312,7 @@ app.use(
 // Route alternative pour accéder aux logos d'entrepôts directement
 app.use("/warehouses", express.static("uploads/warehouses"));
 
-// Servir les fichiers statiques React (build de production)
-app.use(express.static(path.join(__dirname, "build")));
-
-// Gérer toutes les routes non-API en servant index.html (pour SPA React Router)
+// Gérer les routes non-API non trouvées
 app.get("*", (req, res) => {
   // Ne pas intercepter les routes API et uploads
   if (
@@ -323,11 +320,14 @@ app.get("*", (req, res) => {
     req.path.startsWith("/uploads/") ||
     req.path.startsWith("/warehouses/")
   ) {
-    return res.status(404).json({ message: "Route non trouvée" });
+    return res.status(404).json({ message: "Route API non trouvée" });
   }
 
-  // Pour toutes les autres routes, servir index.html pour permettre à React Router de prendre le relais
-  res.sendFile(path.join(__dirname, "build", "index.html"));
+  // Pour toutes les autres routes, renvoyer un message d'erreur
+  res.status(404).json({
+    message: "Route non trouvée",
+    info: "Ce serveur est une API backend. Utilisez les routes /api/*",
+  });
 });
 
 const PORT = process.env.PORT || 3000;
