@@ -1,38 +1,43 @@
 const { Pool } = require("pg");
 require("dotenv").config();
 
-// Configuration PostgreSQL pour Supabase - CONNEXION DIRECTE
+// Configuration PostgreSQL pour Supabase - TRANSACTION POOLER (plus compatible avec Render)
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || process.env.SUPABASE_DB_URL,
+  connectionString:
+    process.env.DATABASE_URL_POOLER ||
+    process.env.DATABASE_URL?.replace(":5432/", ":6543/") ||
+    process.env.SUPABASE_DB_URL,
   ssl: {
     rejectUnauthorized: false,
   },
-  // Configuration optimisée pour Supabase
-  max: 20, // Nombre maximum de connexions dans le pool
-  idleTimeoutMillis: 30000, // Fermer les connexions inactives après 30s
-  connectionTimeoutMillis: 10000, // Timeout de connexion de 10s
+  // Configuration optimisée pour Transaction Pooler
+  max: 10, // Réduit pour Transaction Pooler
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 15000, // Augmenté pour Transaction Pooler
   // Configuration supplémentaire pour résoudre les problèmes de connexion
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
   // CORRECTION: Forcer IPv4 pour éviter les problèmes de connexion IPv6 sur Render
-  options: "-c default_transaction_isolation=read_committed",
   family: 4, // Force IPv4 (4) au lieu d'IPv6 (6)
 });
 
-// Alternative configuration avec paramètres séparés - CONNEXION DIRECTE
+// Alternative configuration avec paramètres séparés - TRANSACTION POOLER
 const poolWithParams = new Pool({
   host: process.env.DB_HOST || "db.oalzqdjcxgeigggkgfszv.supabase.co",
-  port: parseInt(process.env.DB_PORT) || 5432,
+  port:
+    parseInt(process.env.DB_PORT_POOLER) ||
+    parseInt(process.env.DB_PORT) ||
+    6543, // Transaction Pooler port
   user: process.env.DB_USER || "postgres",
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || "postgres",
   ssl: {
     rejectUnauthorized: false,
   },
-  // Configuration optimisée
-  max: 20,
+  // Configuration optimisée pour Transaction Pooler
+  max: 10, // Réduit pour Transaction Pooler
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: 15000, // Augmenté pour Transaction Pooler
   // CORRECTION: Forcer IPv4 pour éviter les problèmes de connexion IPv6 sur Render
   family: 4, // Force IPv4 (4) au lieu d'IPv6 (6)
 });
@@ -40,16 +45,21 @@ const poolWithParams = new Pool({
 // Fonction pour tester la connexion avec plus de détails
 const testConnection = async () => {
   try {
-    console.log("🔄 Test de connexion à Supabase...");
+    console.log("🔄 Test de connexion à Supabase (Transaction Pooler)...");
     console.log("📋 Configuration utilisée:");
     console.log(
       `   - Host: ${
         process.env.DB_HOST || "db.oalzqdjcxgeigggkgfszv.supabase.co"
       }`
     );
-    console.log(`   - Port: ${process.env.DB_PORT || 5432}`);
+    console.log(
+      `   - Port: ${
+        process.env.DB_PORT_POOLER || process.env.DB_PORT || 6543
+      } (Transaction Pooler)`
+    );
     console.log(`   - Database: ${process.env.DB_NAME || "postgres"}`);
     console.log(`   - User: ${process.env.DB_USER || "postgres"}`);
+    console.log("🔧 Mode: Transaction Pooler (plus compatible avec Render)");
 
     const client = await pool.connect();
 
