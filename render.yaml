@@ -8,8 +8,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: SUPABASE_URL
-        value: https://oalzqdjcxgeiggkgfszv.supabase.co
-      - key: SUPABASE_ANON_KEY
-        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hbHpxZGpjeGdlaWdna2dmc3p2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkwMzMyNTksImV4cCI6MjA2NDYwOTI1OX0.IgGTXkby2GY3mufQShWpQFtNfDmT_Ra_Y-04kjvEs7k
+      - key: DATABASE_URL
+        value: REMPLACEZ_PAR_VOTRE_CONNECTION_STRING_PLANETSCALE
+      - key: JWT_SECRET
+        value: votre_secret_jwt_tres_long_et_complexe_pour_production
     healthCheckPath: /
