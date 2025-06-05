@@ -12,6 +12,7 @@
     "health": "node -e \"console.log('Node.js version:', process.version); console.log('Environment variables OK:', !!process.env.DATABASE_URL);\""
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.10",
     "archiver": "^5.3.2",
     "axios": "^1.7.9",
     "bcrypt": "^5.1.1",

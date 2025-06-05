@@ -135,8 +135,70 @@ function adaptMySQLToPostgreSQL(sql) {
   );
 }
 
-module.exports = adaptedPool;
+// Import de l'API Supabase en fallback
+let supabaseApiAdapter;
+try {
+  supabaseApiAdapter = require("./db-supabase-api");
+} catch (error) {
+  console.log("⚠️ Adaptateur API Supabase non disponible:", error.message);
+}
 
-// Exporter aussi le pool natif pour les cas spéciaux
+// Pool intelligent avec fallback
+const smartPool = {
+  // Méthode query avec fallback automatique
+  query: async (sql, params) => {
+    try {
+      // Essayer d'abord PostgreSQL direct
+      return await adaptedPool.query(sql, params);
+    } catch (pgError) {
+      console.log("❌ Erreur PostgreSQL:", pgError.message);
+
+      if (
+        supabaseApiAdapter &&
+        (pgError.message.includes("ENETUNREACH") ||
+          pgError.message.includes("ENOTFOUND") ||
+          pgError.message.includes("connect"))
+      ) {
+        console.log("🔄 Basculement vers API Supabase...");
+        try {
+          return await supabaseApiAdapter.query(sql, params);
+        } catch (apiError) {
+          console.log("❌ Erreur API Supabase aussi:", apiError.message);
+          throw pgError; // Re-lancer l'erreur PostgreSQL originale
+        }
+      }
+
+      throw pgError;
+    }
+  },
+
+  // Méthode getConnection avec fallback
+  getConnection: async () => {
+    try {
+      // Essayer d'abord PostgreSQL direct
+      return await adaptedPool.getConnection();
+    } catch (pgError) {
+      console.log("❌ Erreur connexion PostgreSQL:", pgError.message);
+
+      if (
+        supabaseApiAdapter &&
+        (pgError.message.includes("ENETUNREACH") ||
+          pgError.message.includes("ENOTFOUND") ||
+          pgError.message.includes("connect"))
+      ) {
+        console.log("🔄 Basculement vers API Supabase pour getConnection...");
+        return await supabaseApiAdapter.getConnection();
+      }
+
+      throw pgError;
+    }
+  },
+};
+
+module.exports = smartPool;
+
+// Exporter aussi les pools natifs pour les cas spéciaux
 module.exports.nativePool = pool;
+module.exports.adaptedPool = adaptedPool;
+module.exports.supabaseApiAdapter = supabaseApiAdapter;
 module.exports.testConnection = testConnection;
