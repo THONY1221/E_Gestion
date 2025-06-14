@@ -1,76 +1,58 @@
 const express = require("express");
 const router = express.Router();
-const db = require("../config/db");
-// Import the function to get flattened permission keys and the structure itself
+const db = require("../config/db"); // Assurez-vous que db est configuré pour pg
 const {
   flattenPermissionKeys,
   permissionStructure,
 } = require("../config/permission_structure");
 
 // Helper pour déterminer la clause WHERE pour company_id
-const getCompanyWhereClause = (companyId) => {
+const getCompanyWhereClause = (companyId, paramIndex) => {
   if (companyId && !isNaN(parseInt(companyId))) {
-    // Cibler les rôles spécifiques à l'entreprise ET les rôles globaux
-    return `(roles.company_id = ${parseInt(
-      companyId
-    )} OR roles.company_id IS NULL)`;
-  } else {
-    // Cibler uniquement les rôles globaux si aucune entreprise n'est spécifiée
-    return "roles.company_id IS NULL";
+    return {
+      clause: `(roles.company_id = $${paramIndex} OR roles.company_id IS NULL)`,
+      params: [parseInt(companyId)],
+    };
   }
+  return { clause: "roles.company_id IS NULL", params: [] };
 };
 
 // Helper pour vérifier l'existence d'un nom de rôle (global ou spécifique)
 const checkExistingRoleName = async (name, companyId, excludeRoleId = null) => {
-  let query = "SELECT id FROM roles WHERE name = ?";
+  let query = "SELECT id FROM roles WHERE name = $1";
   const params = [name];
   if (companyId && !isNaN(parseInt(companyId))) {
-    query += " AND company_id = ?";
+    query += " AND company_id = $2";
     params.push(parseInt(companyId));
-  } else {
-    query += " AND company_id IS NULL";
   }
   if (excludeRoleId && !isNaN(parseInt(excludeRoleId))) {
-    query += " AND id != ?";
+    query += " AND id != $3";
     params.push(parseInt(excludeRoleId));
   }
-  const [existing] = await db.query(query, params);
-  return existing.length > 0;
+  const result = await db.query(query, params);
+  return result.rows.length > 0;
 };
 
-// --- Permission Synchronization Logic ---
-
-/**
- * Compares permissions defined in config/permission_structure.js with those
- * in the `permissions` table and inserts any missing ones.
- * Should be run once on application startup.
- */
+// --- Logique de synchronisation des permissions (adaptée pour PostgreSQL) ---
 const syncPermissionsWithDatabase = async () => {
   try {
-    // 1. Get permissions defined in the code
     const codePermissionKeys = flattenPermissionKeys();
-    if (!codePermissionKeys || codePermissionKeys.length === 0) {
-      return;
-    }
-    const codeKeysSet = new Set(codePermissionKeys); // For efficient lookup
+    if (!codePermissionKeys || codePermissionKeys.length === 0) return;
 
-    // 2. Get permissions currently in the database
-    const [dbPermissions] = await db.query("SELECT `key` FROM permissions");
-    const dbKeysSet = new Set(dbPermissions.map((p) => p.key));
+    const dbResult = await db.query("SELECT key FROM permissions");
+    const dbKeysSet = new Set(dbResult.rows.map((p) => p.key));
 
-    // 3. Find keys defined in code but missing in the DB
     const missingKeys = codePermissionKeys.filter((key) => !dbKeysSet.has(key));
 
-    // 4. Insert missing keys if any
     if (missingKeys.length > 0) {
-      const valuesToInsert = missingKeys.map((key) => [key]);
-
-      const [result] = await db.query(
-        "INSERT IGNORE INTO permissions (`key`) VALUES ?",
-        [valuesToInsert]
+      const values = missingKeys.map((key) => `('${key}')`).join(",");
+      await db.query(
+        `INSERT INTO permissions (key) VALUES ${values} ON CONFLICT (key) DO NOTHING`
       );
     }
-  } catch (error) {}
+  } catch (error) {
+    // Erreur silencieuse pour ne pas bloquer le démarrage
+  }
 };
 
 // --- NEW: Ensure SysAdmin Role Exists ---
@@ -80,16 +62,16 @@ const syncPermissionsWithDatabase = async () => {
  */
 const ensureSysAdminRoleExists = async () => {
   try {
-    const [existing] = await db.query(
-      "SELECT id FROM roles WHERE name = ? AND company_id IS NULL",
+    const result = await db.query(
+      "SELECT id FROM roles WHERE name = $1 AND company_id IS NULL",
       ["SysAdmin"]
     );
-    if (existing.length === 0) {
-      const [result] = await db.query(
-        "INSERT INTO roles (name, company_id, created_at, updated_at) VALUES (?, NULL, NOW(), NOW())",
+    if (result.rows.length === 0) {
+      const insertResult = await db.query(
+        "INSERT INTO roles (name, company_id, created_at, updated_at) VALUES ($1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id",
         ["SysAdmin"]
       );
-      console.log(`SysAdmin role created with ID: ${result.insertId}.`);
+      console.log(`SysAdmin role created with ID: ${insertResult.rows[0].id}.`);
     } else {
       console.log("SysAdmin role already exists.");
     }
@@ -102,21 +84,19 @@ const ensureSysAdminRoleExists = async () => {
 
 // --- Gestion des Rôles ---
 
-// GET /api/roles - Lister les rôles (globaux + spécifiques à l'entreprise si fournie)
+// GET /api/roles - Lister les rôles
 router.get("/roles", async (req, res) => {
-  const { company_id } = req.query; // Récupérer company_id des query params
-  const companyWhereClause = getCompanyWhereClause(company_id);
+  const { company_id } = req.query;
+  const { clause, params } = getCompanyWhereClause(company_id, 1);
 
   try {
-    // Ajouter company_id à la sélection pour potentiellement l'afficher/utiliser dans le front
-    const [rows] = await db.query(
-      `SELECT id, name, company_id FROM roles WHERE ${companyWhereClause} ORDER BY company_id ASC, name ASC`
+    const result = await db.query(
+      `SELECT id, name, company_id FROM roles WHERE ${clause} ORDER BY company_id ASC, name ASC`,
+      params
     );
-    res.json({ roles: rows });
+    res.json({ roles: result.rows });
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Erreur serveur lors de la récupération des rôles." });
+    res.status(500).json({ message: "Erreur serveur" });
   }
 });
 
@@ -144,11 +124,11 @@ router.post("/roles", async (req, res) => {
         .json({ message: `Un rôle nommé "${roleName}" existe déjà ${scope}.` });
     }
 
-    const [result] = await db.query(
-      "INSERT INTO roles (name, company_id) VALUES (?, ?)",
+    const result = await db.query(
+      "INSERT INTO roles (name, company_id) VALUES ($1, $2) RETURNING id",
       [roleName, targetCompanyId]
     );
-    const newRoleId = result.insertId;
+    const newRoleId = result.rows[0].id;
     res
       .status(201)
       .json({ id: newRoleId, name: roleName, company_id: targetCompanyId }); // Renvoyer company_id
@@ -189,21 +169,21 @@ router.put("/roles/:id", async (req, res) => {
     }
 
     // Construire la clause WHERE pour cibler le bon rôle
-    let whereClause = "id = ?";
+    let whereClause = "id = $1";
     const params = [roleName, parseInt(id)];
     if (targetCompanyId) {
-      whereClause += " AND company_id = ?";
+      whereClause += " AND company_id = $2";
       params.push(targetCompanyId);
     } else {
       whereClause += " AND company_id IS NULL";
     }
 
-    const [result] = await db.query(
-      `UPDATE roles SET name = ? WHERE ${whereClause}`,
+    const result = await db.query(
+      `UPDATE roles SET name = $1 WHERE ${whereClause} RETURNING id`,
       params
     );
 
-    if (result.affectedRows === 0) {
+    if (result.rows.length === 0) {
       const scopeMsg = targetCompanyId
         ? `pour l'entreprise ID ${targetCompanyId}`
         : "global";
@@ -238,7 +218,7 @@ router.delete("/roles/:id", async (req, res) => {
     await connection.beginTransaction();
 
     // 1. Supprimer les liaisons de permissions (inchangé, basé sur role_id)
-    await connection.query("DELETE FROM permission_role WHERE role_id = ?", [
+    await connection.query("DELETE FROM permission_role WHERE role_id = $1", [
       id,
     ]);
 
@@ -246,17 +226,17 @@ router.delete("/roles/:id", async (req, res) => {
     // await connection.query('DELETE FROM role_user WHERE role_id = ?', [id]);
 
     // 3. Supprimer le rôle lui-même en ciblant le bon scope
-    let deleteQuery = "DELETE FROM roles WHERE id = ?";
+    let deleteQuery = "DELETE FROM roles WHERE id = $1";
     const deleteParams = [parseInt(id)];
     if (targetCompanyId) {
-      deleteQuery += " AND company_id = ?";
+      deleteQuery += " AND company_id = $2";
       deleteParams.push(targetCompanyId);
     } else {
       deleteQuery += " AND company_id IS NULL";
     }
-    const [result] = await connection.query(deleteQuery, deleteParams);
+    const result = await connection.query(deleteQuery, deleteParams);
 
-    if (result.affectedRows === 0) {
+    if (result.rowCount === 0) {
       await connection.rollback();
       connection.release();
       const scopeMsg = targetCompanyId
@@ -279,122 +259,77 @@ router.delete("/roles/:id", async (req, res) => {
   }
 });
 
-// --- Gestion des Permissions pour un Rôle ---
-
-// GET /api/roles/:id/permissions - Obtenir les clés de permission pour un rôle
-router.get("/roles/:id/permissions", async (req, res) => {
-  const { id } = req.params;
-  if (isNaN(parseInt(id))) {
-    return res.status(400).json({ message: "ID de rôle invalide." });
-  }
-
+// GET /api/roles/:roleId/permissions - Obtenir les permissions d'un rôle
+router.get("/roles/:roleId/permissions", async (req, res) => {
   try {
-    // *** HYPOTHESE: Il existe une table `permissions` avec `id` et `key` ***
-    const [permissions] = await db.query(
-      `SELECT p.key 
-       FROM permission_role pr 
-       JOIN permissions p ON pr.permission_id = p.id 
-       WHERE pr.role_id = ?`,
-      [id]
-    );
-    const permissionKeys = permissions.map((p) => p.key);
-    res.json({ permissions: permissionKeys });
+    const { roleId } = req.params;
+    const query = `
+            SELECT p.key FROM permissions p
+            JOIN permission_role pr ON p.id = pr.permission_id
+            WHERE pr.role_id = $1
+        `;
+    const result = await db.query(query, [roleId]);
+    res.json({ permissions: result.rows.map((r) => r.key) });
   } catch (error) {
-    if (error.code === "ER_NO_SUCH_TABLE") {
-      return res.status(500).json({
-        message:
-          "Erreur serveur: La table 'permissions' semble manquante ou mal configurée.",
-      });
-    }
-    res.status(500).json({
-      message:
-        "Erreur serveur lors de la récupération des permissions du rôle.",
-    });
+    res.status(500).json({ message: "Erreur serveur" });
   }
 });
 
-// PUT /api/roles/:id/permissions - Mettre à jour les permissions pour un rôle
-router.put("/roles/:id/permissions", async (req, res) => {
-  const { id: roleIdParam } = req.params;
-  const { permissions: permissionKeys } = req.body; // Attendre un tableau de clés de permission
+// PUT /api/roles/:roleId/permissions - Mettre à jour les permissions d'un rôle
+router.put("/roles/:roleId/permissions", async (req, res) => {
+  const { roleId } = req.params;
+  const { permissions } = req.body; // Array of permission keys
 
-  // --- VALIDATION & PARSING ---
-  const roleId = parseInt(roleIdParam);
-  if (isNaN(roleId)) {
-    return res.status(400).json({ message: "ID de rôle invalide." });
-  }
-  if (!Array.isArray(permissionKeys)) {
-    return res.status(400).json({
-      message: "Le corps de la requête doit contenir un tableau 'permissions'.",
-    });
+  if (!Array.isArray(permissions)) {
+    return res
+      .status(400)
+      .json({ message: "Permissions doit être un tableau." });
   }
 
-  let connection;
+  const client = await db.connect();
   try {
-    connection = await db.getConnection();
-    await connection.beginTransaction();
+    await client.query("BEGIN");
 
-    // 1. Supprimer toutes les permissions existantes pour ce rôle
-    const [deleteResult] = await connection.query(
-      "DELETE FROM permission_role WHERE role_id = ?",
-      [
-        roleId, // Use parsed integer ID
-      ]
-    );
+    // Supprimer les anciennes permissions
+    await client.query("DELETE FROM permission_role WHERE role_id = $1", [
+      roleId,
+    ]);
 
-    // 2. Si de nouvelles permissions sont fournies, les insérer
-    if (permissionKeys.length > 0) {
-      const placeholders = permissionKeys.map(() => "?").join(",");
-      const [permissionRows] = await connection.query(
-        `SELECT id, \`key\` FROM permissions WHERE \`key\` IN (${placeholders})`,
-        permissionKeys
+    if (permissions.length > 0) {
+      // Obtenir les IDs des permissions à partir des clés
+      const placeholders = permissions.map((_, i) => `$${i + 1}`).join(",");
+      const permIdsResult = await client.query(
+        `SELECT id FROM permissions WHERE key IN (${placeholders})`,
+        permissions
       );
+      const permissionIds = permIdsResult.rows.map((r) => r.id);
 
-      const foundKeys = permissionRows.map((p) => p.key);
-      const notFoundKeys = permissionKeys.filter(
-        (key) => !foundKeys.includes(key)
-      );
-
-      if (notFoundKeys.length > 0) {
-        await connection.rollback();
-        connection.release();
-        return res.status(400).json({
-          message: `Certaines clés de permission n'existent pas: ${notFoundKeys.join(
-            ", "
-          )}`,
-        });
-      }
-
-      // Map to [permission_id, role_id] pairs only if there are rows found
-      if (permissionRows.length > 0) {
-        const valuesToInsert = permissionRows.map((p) => [p.id, roleId]); // Use parsed integer roleId
-        if (valuesToInsert.length > 0) {
-          const [insertResult] = await connection.query(
-            "INSERT INTO permission_role (permission_id, role_id) VALUES ?",
-            [valuesToInsert] // Bulk insert requires array of arrays
-          );
-        }
+      // Insérer les nouvelles permissions
+      const insertValues = permissionIds
+        .map((pid) => `(${roleId}, ${pid})`)
+        .join(",");
+      if (insertValues) {
+        await client.query(
+          `INSERT INTO permission_role (role_id, permission_id) VALUES ${insertValues}`
+        );
       }
     }
 
-    await connection.commit();
-    connection.release();
-    res.status(200).json({ message: "Permissions mises à jour avec succès." });
+    await client.query("COMMIT");
+    res.json({ message: "Permissions mises à jour avec succès." });
   } catch (error) {
-    if (connection) {
-      await connection.rollback();
-      connection.release();
-    }
-    if (error.code === "ER_NO_SUCH_TABLE") {
-      return res.status(500).json({
-        message:
-          "Erreur serveur: La table 'permissions' semble manquante ou mal configurée pour la sauvegarde.",
-      });
-    }
-    res.status(500).json({
-      message: "Erreur serveur lors de la mise à jour des permissions.",
-    });
+    await client.query("ROLLBACK");
+    res.status(500).json({ message: "Erreur serveur" });
+  } finally {
+    client.release();
   }
+});
+
+// --- Routes pour les permissions brutes (utilisées par le frontend pour construire l'UI) ---
+router.get("/permissions", (req, res) => {
+  // Renvoyer la structure des permissions directement depuis la configuration
+  // Le frontend peut ainsi construire dynamiquement l'arbre des permissions
+  res.json({ permissionStructure });
 });
 
 // --- NEW Endpoint for Permission Structure ---
@@ -417,11 +352,11 @@ router.get("/permissions/structure", (req, res) => {
 router.get("/permissions", async (req, res) => {
   try {
     // Sélectionner uniquement la colonne 'key' de la table 'permissions'
-    const [rows] = await db.query(
-      "SELECT `key` FROM permissions ORDER BY `key` ASC"
+    const result = await db.query(
+      "SELECT key FROM permissions ORDER BY key ASC"
     );
     // Extraire les clés dans un tableau simple
-    const permissionKeys = rows.map((row) => row.key);
+    const permissionKeys = result.rows.map((row) => row.key);
     // Renvoyer le tableau sous la clé 'permissions' pour correspondre au frontend
     res.json({ permissions: permissionKeys });
   } catch (error) {
@@ -452,12 +387,12 @@ router.post("/roles/notify-changes", async (req, res) => {
 
   try {
     // 1. Trouver tous les utilisateurs qui ont ce rôle
-    const [users] = await db.query(
-      `SELECT id, email, name FROM users WHERE role_id = ?`,
+    const result = await db.query(
+      "SELECT id, email, name FROM users WHERE role_id = $1",
       [role_id]
     );
 
-    if (users.length === 0) {
+    if (result.rows.length === 0) {
       // Aucun utilisateur n'a ce rôle, pas besoin de notification
       return res.json({
         message: "Aucun utilisateur n'a ce rôle",
@@ -468,14 +403,14 @@ router.post("/roles/notify-changes", async (req, res) => {
 
     // 2. Mettre à jour un timestamp dans la table roles pour indiquer quand les permissions ont été modifiées
     // Ce timestamp pourrait être utilisé côté client pour savoir si une mise à jour est nécessaire
-    const [updateResult] = await db.query(
-      `UPDATE roles SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    const updateResult = await db.query(
+      "UPDATE roles SET updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING id",
       [role_id]
     );
 
     // 3. Renvoyer la liste des utilisateurs affectés (pour journalisation ou autre usage)
-    const userEmails = users.map((user) => user.email);
-    const userIds = users.map((user) => user.id);
+    const userEmails = result.rows.map((user) => user.email);
+    const userIds = result.rows.map((user) => user.id);
 
     console.log(
       `Notification de changement pour le rôle ${role_id} envoyée. Utilisateurs affectés:`,
@@ -489,7 +424,7 @@ router.post("/roles/notify-changes", async (req, res) => {
 
     res.json({
       message: "Notification de changement envoyée",
-      affected_users: users.length,
+      affected_users: result.rows.length,
       user_ids: userIds,
       timestamp: Date.now(),
     });
@@ -511,30 +446,29 @@ router.get("/users/:id/permissions", async (req, res) => {
 
   try {
     // 1. Récupérer le rôle de l'utilisateur
-    const [userRows] = await db.query(
-      "SELECT role_id, company_id FROM users WHERE id = ?",
+    const result = await db.query(
+      "SELECT role_id, company_id FROM users WHERE id = $1",
       [id]
     );
 
-    if (userRows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: "Utilisateur non trouvé." });
     }
 
-    const roleId = userRows[0].role_id;
+    const roleId = result.rows[0].role_id;
     if (!roleId) {
       return res.json({ permissions: [] }); // Utilisateur sans rôle
     }
 
     // 2. Récupérer les permissions liées à ce rôle
-    const [permissions] = await db.query(
-      `SELECT p.key 
-       FROM permission_role pr 
-       JOIN permissions p ON pr.permission_id = p.id 
-       WHERE pr.role_id = ?`,
-      [roleId]
-    );
+    const query = `
+      SELECT p.key FROM permissions p
+      JOIN permission_role pr ON p.id = pr.permission_id
+      WHERE pr.role_id = $1
+    `;
+    const permissionsResult = await db.query(query, [roleId]);
 
-    const permissionKeys = permissions.map((p) => p.key);
+    const permissionKeys = permissionsResult.rows.map((p) => p.key);
     res.json({ permissions: permissionKeys });
   } catch (error) {
     console.error("Erreur lors de la récupération des permissions:", error);
