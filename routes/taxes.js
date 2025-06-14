@@ -2,46 +2,9 @@ const express = require("express");
 const router = express.Router();
 const db = require("../config/db");
 
-// Fonction pour s'assurer que la colonne description accepte NULL
-const ensureDescriptionNullable = async () => {
-  const connection = await db.getConnection();
-  try {
-    // Vérifier si la colonne description est NOT NULL
-    const [columns] = await connection.query(`
-      SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_TYPE
-      FROM INFORMATION_SCHEMA.COLUMNS 
-      WHERE TABLE_SCHEMA = DATABASE() 
-      AND TABLE_NAME = 'taxes' 
-      AND COLUMN_NAME = 'description'
-    `);
-
-    if (columns.length > 0 && columns[0].IS_NULLABLE === "NO") {
-      console.log(
-        "Modification de la colonne description pour accepter NULL..."
-      );
-      await connection.query(`
-        ALTER TABLE taxes 
-        MODIFY COLUMN description varchar(200) COLLATE utf8mb4_unicode_ci NULL
-      `);
-      console.log("Colonne description modifiée avec succès.");
-    }
-  } catch (error) {
-    console.warn(
-      "Avertissement lors de la vérification/modification de la colonne description:",
-      error.message
-    );
-  } finally {
-    connection.release();
-  }
-};
-
-// Exécuter la vérification au démarrage du module
-ensureDescriptionNullable();
-
 // Récupérer toutes les taxes avec pagination et filtres
 router.get("/", async (req, res) => {
   console.log("GET /api/taxes - Query params :", req.query);
-  const connection = await db.getConnection();
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -50,7 +13,6 @@ router.get("/", async (req, res) => {
     const status = req.query.status;
     const companyId = req.query.companyId;
 
-    // Log pour le filtrage par entreprise
     if (companyId) {
       console.log(`Filtrage des taxes par entreprise ID: ${companyId}`);
     } else {
@@ -59,56 +21,61 @@ router.get("/", async (req, res) => {
       );
     }
 
-    let query = `
-      SELECT t.*, c.name as company_name,
-             CASE 
-               WHEN t.parent_id IS NOT NULL THEN pt.name 
-               ELSE NULL 
-             END as parent_tax_name
+    let queryParams = [];
+    let countParams = [];
+    let paramIndex = 1;
+
+    let baseQuery = `
       FROM taxes t
       LEFT JOIN companies c ON t.company_id = c.id
       LEFT JOIN taxes pt ON t.parent_id = pt.id
       WHERE 1=1
     `;
-    let countQuery = `SELECT COUNT(*) as count FROM taxes t WHERE 1=1`;
-    const queryParams = [];
-    const countParams = [];
 
     if (companyId) {
-      query += ` AND t.company_id = ?`;
-      countQuery += ` AND t.company_id = ?`;
+      baseQuery += ` AND t.company_id = $${paramIndex++}`;
       queryParams.push(companyId);
       countParams.push(companyId);
     }
 
     if (search) {
-      const searchQuery = ` AND (t.name LIKE ? OR t.code LIKE ?)`;
-      query += searchQuery;
-      countQuery += searchQuery;
+      baseQuery += ` AND (t.name ILIKE $${paramIndex} OR t.code ILIKE $${paramIndex})`;
       const searchParam = `%${search}%`;
-      queryParams.push(searchParam, searchParam);
-      countParams.push(searchParam, searchParam);
+      queryParams.push(searchParam);
+      countParams.push(searchParam);
+      paramIndex++;
     }
 
     if (status) {
-      query += ` AND t.status = ?`;
-      countQuery += ` AND t.status = ?`;
+      baseQuery += ` AND t.status = $${paramIndex++}`;
       queryParams.push(status);
       countParams.push(status);
     }
 
-    query += ` ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
+    const countQuery = `SELECT COUNT(*) as count ${baseQuery}`;
+    const totalResult = await db.query(countQuery, countParams);
+    const total = parseInt(totalResult.rows[0].count, 10);
+
+    let dataQuery = `
+      SELECT t.*, c.name as company_name,
+             CASE 
+               WHEN t.parent_id IS NOT NULL THEN pt.name 
+               ELSE NULL 
+             END as parent_tax_name
+      ${baseQuery}
+      ORDER BY t.created_at DESC 
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+    `;
     queryParams.push(limit, offset);
 
-    const [taxes] = await connection.query(query, queryParams);
-    const [total] = await connection.query(countQuery, countParams);
+    const taxesResult = await db.query(dataQuery, queryParams);
 
     res.json({
-      taxes,
+      taxes: taxesResult.rows,
       pagination: {
         currentPage: page,
-        totalPages: Math.ceil(total[0].count / limit),
-        totalItems: total[0].count,
+        totalPages: Math.ceil(total / limit),
+        totalItems: total,
         itemsPerPage: limit,
       },
     });
@@ -118,17 +85,13 @@ router.get("/", async (req, res) => {
       error: "Erreur lors de la récupération des taxes",
       details: err.message,
     });
-  } finally {
-    connection.release();
   }
 });
 
 // Créer une nouvelle taxe
 router.post("/", async (req, res) => {
-  const connection = await db.getConnection();
+  const client = await db.connect();
   try {
-    await connection.beginTransaction();
-
     const {
       code,
       name,
@@ -140,112 +103,67 @@ router.post("/", async (req, res) => {
       effective_date,
     } = req.body;
 
-    // Validation
     if (!code || !name || rate === undefined) {
-      await connection.rollback();
-      return res.status(400).json({
-        error: "Code, nom et taux sont requis",
-      });
+      return res.status(400).json({ error: "Code, nom et taux sont requis" });
     }
 
-    // Vérifier si le code existe déjà
-    const [existing] = await connection.query(
-      "SELECT id FROM taxes WHERE code = ? AND company_id = ?",
+    await client.query("BEGIN");
+
+    const existingCheck = await client.query(
+      "SELECT id FROM taxes WHERE code = $1 AND company_id = $2",
       [code, company_id]
     );
 
-    if (existing.length > 0) {
-      await connection.rollback();
-      return res.status(400).json({
-        error: "Une taxe avec ce code existe déjà",
-      });
+    if (existingCheck.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ error: "Une taxe avec ce code existe déjà" });
     }
 
-    // Traiter la description optionnelle - utiliser chaîne vide si la colonne ne permet pas NULL
-    let finalDescription =
-      description && description.trim() ? description.trim() : null;
+    const insertQuery = `
+      INSERT INTO taxes (
+        code, name, rate, description, status,
+        company_id, parent_id, effective_date,
+        created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+      RETURNING id
+    `;
+    const insertParams = [
+      code,
+      name,
+      parseFloat(rate),
+      description || null,
+      status,
+      company_id,
+      parent_id || null,
+      effective_date || null,
+    ];
 
-    try {
-      const [result] = await connection.query(
-        `INSERT INTO taxes (
-          code, name, rate, description, status,
-          company_id, parent_id, effective_date,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-        [
-          code,
-          name,
-          rate,
-          finalDescription,
-          status,
-          company_id,
-          parent_id,
-          effective_date,
-        ]
-      );
+    const result = await client.query(insertQuery, insertParams);
 
-      await connection.commit();
+    await client.query("COMMIT");
 
-      res.status(201).json({
-        message: "Taxe créée avec succès",
-        id: result.insertId,
-      });
-    } catch (insertError) {
-      // Si l'erreur est liée à NULL non autorisé pour description, essayer avec chaîne vide
-      if (
-        insertError.code === "ER_BAD_NULL_ERROR" &&
-        insertError.sqlMessage.includes("description")
-      ) {
-        console.log("Tentative avec chaîne vide pour la description...");
-        finalDescription =
-          description && description.trim() ? description.trim() : "";
-
-        const [result] = await connection.query(
-          `INSERT INTO taxes (
-            code, name, rate, description, status,
-            company_id, parent_id, effective_date,
-            created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-          [
-            code,
-            name,
-            rate,
-            finalDescription,
-            status,
-            company_id,
-            parent_id,
-            effective_date,
-          ]
-        );
-
-        await connection.commit();
-
-        res.status(201).json({
-          message: "Taxe créée avec succès",
-          id: result.insertId,
-        });
-      } else {
-        throw insertError; // Relancer l'erreur si ce n'est pas le problème de NULL
-      }
-    }
+    res.status(201).json({
+      message: "Taxe créée avec succès",
+      id: result.rows[0].id,
+    });
   } catch (err) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     console.error("Erreur lors de la création de la taxe:", err);
     res.status(500).json({
       error: "Erreur lors de la création de la taxe",
       details: err.message,
     });
   } finally {
-    connection.release();
+    client.release();
   }
 });
 
 // Mettre à jour une taxe
 router.put("/:id", async (req, res) => {
-  const connection = await db.getConnection();
+  const client = await db.connect();
   try {
-    await connection.beginTransaction();
-
     const { id } = req.params;
     const {
       code,
@@ -253,246 +171,181 @@ router.put("/:id", async (req, res) => {
       rate,
       description,
       status,
-      company_id,
       parent_id,
       effective_date,
+      company_id,
     } = req.body;
 
-    // Vérifier si la taxe existe
-    const [existing] = await connection.query(
-      "SELECT * FROM taxes WHERE id = ?",
-      [id]
+    if (!code || !name || rate === undefined) {
+      return res.status(400).json({ error: "Code, nom et taux sont requis" });
+    }
+
+    await client.query("BEGIN");
+
+    // Vérifier si un autre taxe avec le même code existe pour cette entreprise
+    const existingCheck = await client.query(
+      "SELECT id FROM taxes WHERE code = $1 AND company_id = $2 AND id != $3",
+      [code, company_id, id]
     );
 
-    if (existing.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ error: "Taxe non trouvée" });
-    }
-
-    // Vérifier si le nouveau code n'est pas déjà utilisé
-    if (code !== existing[0].code) {
-      const [codeExists] = await connection.query(
-        "SELECT id FROM taxes WHERE code = ? AND company_id = ? AND id != ?",
-        [code, company_id, id]
-      );
-
-      if (codeExists.length > 0) {
-        await connection.rollback();
-        return res.status(400).json({
-          error: "Ce code est déjà utilisé par une autre taxe",
+    if (existingCheck.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(409)
+        .json({
+          error: "Un autre taxe avec ce code existe déjà pour cette entreprise",
         });
-      }
     }
 
-    // Traiter la description optionnelle
-    const finalDescription =
-      description !== undefined
-        ? description && description.trim()
-          ? description.trim()
-          : null
-        : existing[0].description;
-
-    const updates = {
+    const updateQuery = `
+      UPDATE taxes SET
+        code = $1, name = $2, rate = $3, description = $4, status = $5,
+        parent_id = $6, effective_date = $7, updated_at = NOW()
+      WHERE id = $8 AND company_id = $9
+    `;
+    const updateParams = [
       code,
       name,
-      rate,
-      description: finalDescription,
+      parseFloat(rate),
+      description || null,
       status,
+      parent_id || null,
+      effective_date || null,
+      id,
       company_id,
-      parent_id,
-      effective_date,
-      updated_at: new Date(),
-    };
+    ];
 
-    // Filtrer les champs non définis
-    Object.keys(updates).forEach(
-      (key) => updates[key] === undefined && delete updates[key]
-    );
+    const result = await client.query(updateQuery, updateParams);
 
-    try {
-      const [result] = await connection.query(
-        "UPDATE taxes SET ? WHERE id = ?",
-        [updates, id]
-      );
-
-      if (result.affectedRows === 0) {
-        await connection.rollback();
-        return res.status(404).json({ error: "Taxe non trouvée" });
-      }
-
-      await connection.commit();
-
-      res.json({
-        message: "Taxe mise à jour avec succès",
-        updates,
-      });
-    } catch (updateError) {
-      // Si l'erreur est liée à NULL non autorisé pour description, essayer avec chaîne vide
-      if (
-        updateError.code === "ER_BAD_NULL_ERROR" &&
-        updateError.sqlMessage.includes("description")
-      ) {
-        console.log(
-          "Tentative de mise à jour avec chaîne vide pour la description..."
-        );
-
-        // Recréer l'objet updates avec chaîne vide pour description
-        const updatesWithEmptyDescription = {
-          ...updates,
-          description:
-            description !== undefined
-              ? description && description.trim()
-                ? description.trim()
-                : ""
-              : existing[0].description || "",
-        };
-
-        const [result] = await connection.query(
-          "UPDATE taxes SET ? WHERE id = ?",
-          [updatesWithEmptyDescription, id]
-        );
-
-        if (result.affectedRows === 0) {
-          await connection.rollback();
-          return res.status(404).json({ error: "Taxe non trouvée" });
-        }
-
-        await connection.commit();
-
-        res.json({
-          message: "Taxe mise à jour avec succès",
-          updates: updatesWithEmptyDescription,
-        });
-      } else {
-        throw updateError; // Relancer l'erreur si ce n'est pas le problème de NULL
-      }
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ error: "Taxe non trouvée ou non autorisée." });
     }
+
+    await client.query("COMMIT");
+    res.json({ message: "Taxe mise à jour avec succès" });
   } catch (err) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     console.error("Erreur lors de la mise à jour de la taxe:", err);
     res.status(500).json({
       error: "Erreur lors de la mise à jour de la taxe",
       details: err.message,
     });
   } finally {
-    connection.release();
+    client.release();
   }
 });
 
 // Supprimer une taxe
 router.delete("/:id", async (req, res) => {
-  const connection = await db.getConnection();
+  const client = await db.connect();
+  const { id } = req.params;
+  const { companyId } = req.query; // Doit être passé en query param pour la sécurité
+
+  if (!companyId) {
+    return res.status(400).json({ error: "L'ID de l'entreprise est requis." });
+  }
+
   try {
-    await connection.beginTransaction();
+    await client.query("BEGIN");
 
-    const { id } = req.params;
-
-    // Vérifier si la taxe existe d'abord
-    const [taxExists] = await connection.query(
-      "SELECT id FROM taxes WHERE id = ? FOR UPDATE",
+    // Vérifier si la taxe est utilisée comme taxe parente
+    const childCheck = await client.query(
+      "SELECT id FROM taxes WHERE parent_id = $1",
       [id]
     );
-
-    if (taxExists.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ error: "Taxe non trouvée" });
-    }
-
-    // Vérifier si la taxe est utilisée dans d'autres taxes (comme parent)
-    const [usedAsParent] = await connection.query(
-      `SELECT COUNT(*) as count 
-       FROM taxes 
-       WHERE parent_id = ?`,
-      [id]
-    );
-
-    if (usedAsParent[0].count > 0) {
-      await connection.rollback();
+    if (childCheck.rows.length > 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({
         error:
-          "Cette taxe est utilisée comme taxe parente et ne peut pas être supprimée",
+          "Impossible de supprimer cette taxe car elle est utilisée comme taxe parente par d'autres taxes.",
       });
     }
 
-    // Si la taxe n'est pas utilisée, on peut la supprimer
-    const [result] = await connection.query("DELETE FROM taxes WHERE id = ?", [
-      id,
-    ]);
+    const result = await client.query(
+      "DELETE FROM taxes WHERE id = $1 AND company_id = $2",
+      [id, companyId]
+    );
 
-    if (result.affectedRows === 0) {
-      await connection.rollback();
-      return res.status(404).json({ error: "Taxe non trouvée" });
+    if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ error: "Taxe non trouvée ou non autorisée." });
     }
 
-    await connection.commit();
-
-    res.json({
-      message: "Taxe supprimée avec succès",
-      deletedId: id,
-    });
+    await client.query("COMMIT");
+    res.json({ message: "Taxe supprimée avec succès" });
   } catch (err) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     console.error("Erreur lors de la suppression de la taxe:", err);
     res.status(500).json({
       error: "Erreur lors de la suppression de la taxe",
       details: err.message,
     });
   } finally {
-    connection.release();
+    client.release();
   }
 });
 
-// Mettre à jour le statut d'une taxe
-router.patch("/:id/status", async (req, res) => {
-  const connection = await db.getConnection();
+// Récupérer une taxe par ID
+router.get("/:id", async (req, res) => {
+  const { id } = req.params;
   try {
-    await connection.beginTransaction();
-
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (!["active", "inactive"].includes(status)) {
-      await connection.rollback();
-      return res.status(400).json({
-        error: "Le statut doit être 'active' ou 'inactive'",
-      });
-    }
-
-    const [result] = await connection.query(
-      `UPDATE taxes 
-       SET status = ?, 
-           updated_at = NOW() 
-       WHERE id = ?`,
-      [status, id]
-    );
-
-    if (result.affectedRows === 0) {
-      await connection.rollback();
-      return res.status(404).json({ error: "Taxe non trouvée" });
-    }
-
-    const [updatedTax] = await connection.query(
-      `SELECT id, code, name, rate, status, updated_at
-       FROM taxes 
-       WHERE id = ?`,
+    const result = await db.query(
+      `SELECT t.*, c.name as company_name, pt.name as parent_tax_name
+       FROM taxes t
+       LEFT JOIN companies c ON t.company_id = c.id
+       LEFT JOIN taxes pt ON t.parent_id = pt.id
+       WHERE t.id = $1`,
       [id]
     );
-
-    await connection.commit();
-
-    res.json({
-      message: "Statut de la taxe mis à jour avec succès",
-      tax: updatedTax[0],
-    });
+    if (result.rows.length > 0) {
+      res.json(result.rows[0]);
+    } else {
+      res.status(404).json({ error: "Taxe non trouvée" });
+    }
   } catch (err) {
-    await connection.rollback();
-    console.error("Erreur lors de la mise à jour du statut:", err);
-    res.status(500).json({
-      error: "Erreur lors de la mise à jour du statut",
-      details: err.message,
-    });
-  } finally {
-    connection.release();
+    console.error("Erreur lors de la récupération de la taxe:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// Récupérer les taxes pour une entreprise spécifique (pour les listes déroulantes)
+router.get("/for-company/:companyId", async (req, res) => {
+  const { companyId } = req.params;
+  try {
+    const result = await db.query(
+      "SELECT id, name, code, rate FROM taxes WHERE company_id = $1 AND status = 'active' ORDER BY name",
+      [companyId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(
+      "Erreur lors de la récupération des taxes pour l'entreprise:",
+      err
+    );
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// LOV (List of Values) pour les taxes (noms et IDs)
+router.get("/lov", async (req, res) => {
+  const { companyId } = req.query;
+  if (!companyId) {
+    return res.status(400).json({ error: "L'ID de l'entreprise est requis" });
+  }
+  try {
+    const { rows } = await db.query(
+      "SELECT id, name FROM taxes WHERE company_id = $1 ORDER BY name",
+      [companyId]
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error("Erreur lors de la récupération de la LOV des taxes:", error);
+    res.status(500).json({ message: "Erreur serveur" });
   }
 });
 

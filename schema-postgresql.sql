@@ -273,11 +273,10 @@ CREATE TABLE payment_transcations (
 DROP TABLE IF EXISTS permissions CASCADE;
 CREATE TABLE permissions (
   id BIGSERIAL PRIMARY KEY,
-  name VARCHAR(191) NOT NULL,
-  display_name VARCHAR(191) NOT NULL,
-  description VARCHAR(191) DEFAULT NULL,
-  module_name VARCHAR(191) NOT NULL,
-  key VARCHAR(191) NOT NULL
+  key VARCHAR(255) NOT NULL UNIQUE,
+  description VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Table permission_role
@@ -285,7 +284,9 @@ DROP TABLE IF EXISTS permission_role CASCADE;
 CREATE TABLE permission_role (
   id BIGSERIAL PRIMARY KEY,
   permission_id BIGINT NOT NULL,
-  role_id BIGINT NOT NULL
+  role_id BIGINT NOT NULL,
+  FOREIGN KEY (permission_id) REFERENCES permissions(id),
+  FOREIGN KEY (role_id) REFERENCES roles(id)
 );
 
 -- Table production_logs
@@ -405,21 +406,19 @@ CREATE TABLE product_variants (
 DROP TABLE IF EXISTS roles CASCADE;
 CREATE TABLE roles (
   id BIGSERIAL PRIMARY KEY,
-  company_id BIGINT DEFAULT NULL,
-  name VARCHAR(191) NOT NULL,
-  display_name VARCHAR(191) NOT NULL,
-  description VARCHAR(191) DEFAULT NULL,
-  is_deletable BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMP DEFAULT NULL,
-  updated_at TIMESTAMP DEFAULT NULL
+  name VARCHAR(255) NOT NULL,
+  description VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Table role_user
 DROP TABLE IF EXISTS role_user CASCADE;
 CREATE TABLE role_user (
   id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL,
   role_id BIGINT NOT NULL,
-  user_id BIGINT NOT NULL
+  FOREIGN KEY (role_id) REFERENCES roles(id)
 );
 
 -- Table settings
@@ -651,4 +650,51 @@ INSERT INTO categories (company_id, name, description, slug, parent_id) VALUES
 
 -- Insertion d'un utilisateur admin par défaut (mot de passe: admin123)
 INSERT INTO users (company_id, name, email, password, is_superadmin, status) VALUES
-(1, 'Administrator', 'admin@elsa-technologies.com', '$2b$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', TRUE, 'enabled'); 
+(1, 'Administrator', 'admin@elsa-technologies.com', '$2b$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', TRUE, 'enabled');
+
+-- Insertion des permissions de base
+INSERT INTO permissions (key, description, created_at, updated_at) VALUES
+('Gestion Commerciale.Dashboard.view', 'Voir le tableau de bord', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.GestionUtilisateurs.view', 'Voir les utilisateurs', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.GestionUtilisateurs.create', 'Créer un utilisateur', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.GestionUtilisateurs.edit', 'Modifier un utilisateur', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.GestionUtilisateurs.delete', 'Supprimer un utilisateur', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.GestionUtilisateurs.assign_role', 'Assigner un rôle à un utilisateur', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.GestionUtilisateurs.assign_sysadmin', 'Autoriser l''assignation du rôle SysAdmin', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.RolesPermissions.view', 'Voir les rôles et permissions', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.RolesPermissions.create', 'Créer un rôle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.RolesPermissions.edit', 'Modifier un rôle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.RolesPermissions.delete', 'Supprimer un rôle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin.RolesPermissions.assign_permissions', 'Assigner des permissions à un rôle', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+
+-- Création des rôles de base
+INSERT INTO roles (name, description, created_at, updated_at) VALUES
+('SysAdmin', 'Administrateur système avec tous les droits', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+('Admin', 'Administrateur avec droits limités', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+
+-- Attribution des permissions au rôle SysAdmin
+INSERT INTO permission_role (permission_id, role_id)
+SELECT p.id, r.id
+FROM permissions p
+CROSS JOIN roles r
+WHERE r.name = 'SysAdmin';
+
+-- Attribution des permissions de base au rôle Admin
+INSERT INTO permission_role (permission_id, role_id)
+SELECT p.id, r.id
+FROM permissions p
+CROSS JOIN roles r
+WHERE r.name = 'Admin'
+AND p.key IN (
+    'Gestion Commerciale.Dashboard.view',
+    'Admin.GestionUtilisateurs.view',
+    'Admin.GestionUtilisateurs.create',
+    'Admin.GestionUtilisateurs.edit',
+    'Admin.RolesPermissions.view'
+);
+
+-- Attribution du rôle SysAdmin à l'utilisateur avec ID 25 (Anthony SIB)
+INSERT INTO role_user (user_id, role_id)
+SELECT 25, r.id
+FROM roles r
+WHERE r.name = 'SysAdmin'; 
