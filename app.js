@@ -45,6 +45,18 @@ syncPermissionsWithDatabase().catch((error) => {
 
 const app = express();
 
+// --- Configuration CORS ---
+const corsOptions = {
+  origin: process.env.CORS_ORIGIN || "*", // Autorise l'origine de Vercel ou toutes les origines si non définie
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+  credentials: true,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+console.log(`[CORS] Autorisation pour l'origine : ${corsOptions.origin}`);
+// --- Fin Configuration CORS ---
+
 // --- Permission Check on Startup ---
 const tempImportDir = path.join(__dirname, "uploads/temp_imports");
 // Ensure directory exists before checking permissions
@@ -74,8 +86,8 @@ try {
 // --- End Permission Check ---
 
 // Middlewares globaux
-app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Configuration du moteur de template EJS
 app.set("view engine", "ejs");
