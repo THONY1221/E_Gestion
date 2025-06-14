@@ -117,7 +117,7 @@ router.get("/:id", async (req, res) => {
     }
 
     const [warehouse] = await connection.query(
-      `SELECT w.*, c.name as company_name 
+      `SELECT w.id, w.company_id, w.logo, w.dark_logo, w.name, w.slug, w.email, w.phone, w.website, w.show_email_on_invoice, w.show_phone_on_invoice, w.status, w.address, w.tax_number, w.rccm_number, w.registration_number, w.capital_social, w.legal_status, w.terms_condition, w.bank_details, w.signature, c.name as company_name 
        FROM warehouses w 
        LEFT JOIN companies c ON w.company_id = c.id 
        WHERE w.id = ?`,
@@ -153,21 +153,19 @@ router.put("/:id", logoFields, async (req, res) => {
       name,
       address,
       phone,
-      company_id,
       email,
       status, // "active" ou "inactive"
       show_email_on_invoice,
       show_phone_on_invoice,
       terms_condition,
       bank_details,
-      online_store_enabled,
-      customers_visibility,
-      suppliers_visibility,
-      products_visibility,
-      default_pos_order_status,
-      show_mrp_on_invoice,
-      show_discount_tax_on_invoice,
-      prefixe_inv,
+      // Nouveaux champs
+      website,
+      tax_number,
+      rccm_number,
+      registration_number,
+      capital_social,
+      legal_status,
     } = req.body;
 
     const [existing] = await connection.query(
@@ -182,16 +180,18 @@ router.put("/:id", logoFields, async (req, res) => {
     const logos = {};
     if (req.files) {
       Object.keys(req.files).forEach((key) => {
-        logos[key] = `/uploads/warehouses/${req.files[key][0].filename}`;
+        logos[key] = `uploads/warehouses/${req.files[key][0].filename}`;
         if (existing[0][key]) {
-          const oldPath = path.join(
-            __dirname,
-            "..",
-            "public",
-            existing[0][key].replace(/^\//, "")
-          );
+          const oldPath = path.join(__dirname, "..", existing[0][key]);
           if (fs.existsSync(oldPath)) {
-            fs.unlinkSync(oldPath);
+            try {
+              fs.unlinkSync(oldPath);
+            } catch (err) {
+              console.error(
+                `Impossible de supprimer l'ancien fichier: ${oldPath}`,
+                err
+              );
+            }
           }
         }
       });
@@ -201,73 +201,46 @@ router.put("/:id", logoFields, async (req, res) => {
       name,
       address,
       phone,
-      company_id,
       email,
       status,
-      show_email_on_invoice: Object.prototype.hasOwnProperty.call(
-        req.body,
-        "show_email_on_invoice"
-      )
-        ? toBooleanInt(show_email_on_invoice, false)
-        : existing[0].show_email_on_invoice,
-      show_phone_on_invoice: Object.prototype.hasOwnProperty.call(
-        req.body,
-        "show_phone_on_invoice"
-      )
-        ? toBooleanInt(show_phone_on_invoice, false)
-        : existing[0].show_phone_on_invoice,
+      show_email_on_invoice: toBooleanInt(
+        show_email_on_invoice,
+        existing[0].show_email_on_invoice
+      ),
+      show_phone_on_invoice: toBooleanInt(
+        show_phone_on_invoice,
+        existing[0].show_phone_on_invoice
+      ),
       terms_condition,
       bank_details,
-      prefixe_inv,
-      online_store_enabled: Object.prototype.hasOwnProperty.call(
-        req.body,
-        "online_store_enabled"
-      )
-        ? toBooleanInt(online_store_enabled, true)
-        : existing[0].online_store_enabled,
-      customers_visibility,
-      suppliers_visibility,
-      products_visibility,
-      default_pos_order_status,
-      show_mrp_on_invoice: Object.prototype.hasOwnProperty.call(
-        req.body,
-        "show_mrp_on_invoice"
-      )
-        ? toBooleanInt(show_mrp_on_invoice, true)
-        : existing[0].show_mrp_on_invoice,
-      show_discount_tax_on_invoice: Object.prototype.hasOwnProperty.call(
-        req.body,
-        "show_discount_tax_on_invoice"
-      )
-        ? toBooleanInt(show_discount_tax_on_invoice, true)
-        : existing[0].show_discount_tax_on_invoice,
+      // Nouveaux champs
+      website,
+      tax_number,
+      rccm_number,
+      registration_number,
+      capital_social,
+      legal_status,
       updated_at: new Date(),
       ...logos,
     };
 
+    // Filtrer les champs non définis pour ne pas écraser avec NULL
     Object.keys(updates).forEach(
       (key) => updates[key] === undefined && delete updates[key]
     );
 
-    const [result] = await connection.query(
-      "UPDATE warehouses SET ? WHERE id = ?",
-      [updates, id]
-    );
+    await connection.query("UPDATE warehouses SET ? WHERE id = ?", [
+      updates,
+      id,
+    ]);
 
-    if (result.affectedRows === 0) {
-      await connection.rollback();
-      return res.status(404).json({ error: "Entrepôt non trouvé" });
-    }
+    await connection.commit();
 
     const [updatedWarehouse] = await connection.query(
-      `SELECT w.*, c.name as company_name 
-       FROM warehouses w 
-       LEFT JOIN companies c ON w.company_id = c.id 
-       WHERE w.id = ?`,
+      "SELECT * FROM warehouses WHERE id = ?",
       [id]
     );
 
-    await connection.commit();
     res.json({
       message: "Entrepôt mis à jour avec succès",
       warehouse: updatedWarehouse[0],
@@ -310,6 +283,13 @@ router.post("/", logoFields, async (req, res) => {
       show_mrp_on_invoice,
       show_discount_tax_on_invoice,
       prefixe_inv,
+      // Nouveaux champs légaux
+      website,
+      tax_number,
+      rccm_number,
+      registration_number,
+      capital_social,
+      legal_status,
     } = req.body;
 
     const [company] = await connection.query(
@@ -333,13 +313,14 @@ router.post("/", logoFields, async (req, res) => {
         name, address, phone, company_id, email,
         logo, dark_logo, signature,
         status,
+        website, tax_number, rccm_number, registration_number, capital_social, legal_status,
         show_email_on_invoice, show_phone_on_invoice,
         terms_condition, bank_details, prefixe_inv,
         online_store_enabled, customers_visibility,
         suppliers_visibility, products_visibility,
         default_pos_order_status, show_mrp_on_invoice,
         show_discount_tax_on_invoice, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         name,
         address,
@@ -350,6 +331,12 @@ router.post("/", logoFields, async (req, res) => {
         logos.dark_logo || null,
         logos.signature || null,
         status || "active",
+        website || null,
+        tax_number || null,
+        rccm_number || null,
+        registration_number || null,
+        capital_social || null,
+        legal_status || null,
         toBooleanInt(show_email_on_invoice, false),
         toBooleanInt(show_phone_on_invoice, false),
         terms_condition,

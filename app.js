@@ -33,6 +33,7 @@ const {
 const userPermissionsRoutes = require("./routes/UserPermissions");
 // Import de la nouvelle route pour le tableau de bord
 const dashboardRoutes = require("./routes/dashboard");
+const verificationRoutes = require("./routes/verification");
 
 // *** Execute Permission Synchronization on Startup ***
 syncPermissionsWithDatabase().catch((error) => {
@@ -73,19 +74,12 @@ try {
 // --- End Permission Check ---
 
 // Middlewares globaux
-const corsOptions = {
-  origin: [
-    "https://elsa-gestion-front-end.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:3001",
-  ],
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
-
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(express.json());
+
+// Configuration du moteur de template EJS
+app.set("view engine", "ejs");
+app.set("views", path.join(__dirname, "views"));
 
 // --- NOUVELLE ROUTE LOGIN ---
 app.post("/api/login", async (req, res) => {
@@ -251,76 +245,8 @@ app.post("/api/login", async (req, res) => {
 });
 // --- FIN NOUVELLE ROUTE LOGIN ---
 
-// Route de santé pour le monitoring Render
-app.get("/api/health", async (req, res) => {
-  try {
-    // Test de connexion à la base de données
-    const connection = await db.getConnection();
-    await connection.query("SELECT 1");
-    connection.release();
-
-    res.json({
-      status: "ok",
-      timestamp: new Date().toISOString(),
-      database: "connected",
-      message: "E_Gestion Backend is healthy",
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: "error",
-      timestamp: new Date().toISOString(),
-      database: "disconnected",
-      message: "Database connection failed",
-      error: error.message,
-    });
-  }
-});
-
-// Route temporaire pour créer l'utilisateur admin
-app.get("/api/create-admin", async (req, res) => {
-  let connection;
-  try {
-    connection = await db.getConnection();
-
-    // Vérifier si l'utilisateur admin existe
-    const [existingUsers] = await connection.query(
-      "SELECT id, email, status FROM users WHERE email = ?",
-      ["admin@elsa-technologies.com"]
-    );
-
-    if (existingUsers.length > 0) {
-      return res.json({
-        message: "Utilisateur admin existe déjà",
-        user: existingUsers[0],
-      });
-    }
-
-    // Créer l'utilisateur admin
-    const hashedPassword = await bcrypt.hash("admin123", 10);
-    const [result] = await connection.query(
-      `INSERT INTO users (name, email, password, status, is_superadmin, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
-      ["Admin", "admin@elsa-technologies.com", hashedPassword, "enabled", 1]
-    );
-
-    res.json({
-      message: "Utilisateur admin créé avec succès",
-      userId: result[0]?.id || result.insertId,
-      email: "admin@elsa-technologies.com",
-      password: "admin123",
-    });
-  } catch (error) {
-    console.error("Erreur création admin:", error);
-    res.status(500).json({
-      message: "Erreur lors de la création de l'admin",
-      error: error.message,
-    });
-  } finally {
-    if (connection) {
-      connection.release();
-    }
-  }
-});
+// Route publique de vérification (sans authentification)
+app.use("/verify", verificationRoutes);
 
 // Définition des routes API
 app.use("/api/produits", produitsRoutes);
@@ -358,7 +284,10 @@ app.use(
 // Route alternative pour accéder aux logos d'entrepôts directement
 app.use("/warehouses", express.static("uploads/warehouses"));
 
-// Gérer les routes non-API non trouvées
+// Servir les fichiers statiques React (build de production)
+app.use(express.static(path.join(__dirname, "build")));
+
+// Gérer toutes les routes non-API en servant index.html (pour SPA React Router)
 app.get("*", (req, res) => {
   // Ne pas intercepter les routes API et uploads
   if (
@@ -366,23 +295,14 @@ app.get("*", (req, res) => {
     req.path.startsWith("/uploads/") ||
     req.path.startsWith("/warehouses/")
   ) {
-    return res.status(404).json({ message: "Route API non trouvée" });
+    return res.status(404).json({ message: "Route non trouvée" });
   }
 
-  // Pour toutes les autres routes, renvoyer un message d'erreur
-  res.status(404).json({
-    message: "Route non trouvée",
-    info: "Ce serveur est une API backend. Utilisez les routes /api/*",
-  });
+  // Pour toutes les autres routes, servir index.html pour permettre à React Router de prendre le relais
+  res.sendFile(path.join(__dirname, "build", "index.html"));
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 E_Gestion Backend démarré sur le port ${PORT}`);
-  console.log(`🌍 Environnement: ${process.env.NODE_ENV || "development"}`);
-  console.log(
-    `🗄️ Base de données: ${
-      process.env.DATABASE_URL ? "PostgreSQL (Render)" : "Configuration locale"
-    }`
-  );
+  console.log(`Votre Serveur a démarré sur http://localhost:${PORT}`);
 });

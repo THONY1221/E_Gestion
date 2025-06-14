@@ -1,0 +1,100 @@
+# Nginx configuration for ELSA GESTION
+# Placez ce fichier dans /etc/nginx/sites-available/
+# Créez un lien symbolique: ln -s /etc/nginx/sites-available/elsa-gestion /etc/nginx/sites-enabled/
+# Testez la configuration: nginx -t
+# Rechargez Nginx: systemctl reload nginx
+
+server {
+    listen 80;
+    server_name votre-domaine.com www.votre-domaine.com;
+    
+    # Redirection vers HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+    
+    # Configuration pour Let's Encrypt
+    location /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name votre-domaine.com www.votre-domaine.com;
+    
+    # SSL configuration
+    ssl_certificate /etc/letsencrypt/live/votre-domaine.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/votre-domaine.com/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/votre-domaine.com/chain.pem;
+    
+    # Optimisations SSL
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+    
+    # HSTS (Strict Transport Security)
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    
+    # Autres en-têtes de sécurité
+    add_header X-Content-Type-Options nosniff;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-XSS-Protection "1; mode=block";
+    
+    # Racine des fichiers statiques (frontend)
+    root /var/www/elsa-gestion/build;
+    index index.html;
+    
+    # Gestion des routes frontend (SPA)
+    location / {
+        try_files $uri $uri/ /index.html;
+        expires 1h;
+    }
+    
+    # API backend
+    location /api {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        # Protection contre les lenteurs côté backend
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+    
+    # Dossier des uploads
+    location /uploads {
+        alias /var/www/elsa-gestion/uploads;
+        autoindex off;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+    }
+    
+    # Compression gzip
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+    
+    # Désactiver l'accès aux fichiers cachés
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    
+    # Logs
+    access_log /var/log/nginx/elsa-gestion.access.log;
+    error_log /var/log/nginx/elsa-gestion.error.log;
+} 

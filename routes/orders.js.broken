@@ -2,147 +2,15 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../config/db");
-const InvoiceGenerator = require("../utils/pdfGenerator");
+const { generateInvoiceHTML } = require("../utils/InvoiceHTMLTemplate");
+const {
+  generateEnhancedInvoiceHTML,
+} = require("../utils/EnhancedInvoiceHTMLTemplate");
 const path = require("path");
 const fs = require("fs-extra");
-const QRCode = require("qrcode");
-
-// ======================================================================
-// QR Code Generation Helper
-// ======================================================================
-
-/**
- * Generate QR code for invoice verification
- * @param {string} invoiceNumber - The invoice number to verify
- * @param {string} baseUrl - Base URL of the application (optional)
- * @returns {Promise<string>} Base64 encoded QR code image
- */
-async function generateInvoiceQRCode(invoiceNumber, baseUrl = null) {
-  try {
-    // Get base URL from environment or use localhost as fallback
-    const verificationBaseUrl =
-      baseUrl ||
-      process.env.APP_BASE_URL ||
-      process.env.VERIFICATION_BASE_URL ||
-      "http://localhost:3000";
-
-    // Create verification URL
-    const verificationUrl = `${verificationBaseUrl}/verify/invoice/${invoiceNumber}`;
-
-    console.log(`[QR Code] Generating QR code for invoice: ${invoiceNumber}`);
-    console.log(`[QR Code] Verification URL: ${verificationUrl}`);
-
-    // Generate QR code as base64 data URL
-    const qrCodeDataUrl = await QRCode.toDataURL(verificationUrl, {
-      type: "image/png",
-      quality: 0.92,
-      margin: 1,
-      color: {
-        dark: "#000000", // Black dots
-        light: "#FFFFFF", // White background
-      },
-      width: 200, // Size in pixels
-    });
-
-    console.log(
-      `[QR Code] Successfully generated QR code for invoice: ${invoiceNumber}`
-    );
-    return qrCodeDataUrl;
-  } catch (error) {
-    console.error(
-      `[QR Code] Error generating QR code for invoice ${invoiceNumber}:`,
-      error
-    );
-    // Return empty string as fallback to prevent PDF generation failure
-    return "";
-  }
-}
-
-/**
- * Inject QR code into HTML content
- * @param {string} htmlContent - Original HTML content
- * @param {string} qrCodeDataUrl - Base64 QR code data URL
- * @param {string} invoiceNumber - Invoice number for display
- * @returns {string} Modified HTML content with QR code
- */
-function injectQRCodeIntoHTML(htmlContent, qrCodeDataUrl, invoiceNumber) {
-  if (!qrCodeDataUrl) {
-    console.log("[QR Code] No QR code provided, skipping injection");
-    return htmlContent;
-  }
-
-  try {
-    // Create QR code HTML section
-    const qrCodeSection = `
-      <div class="qr-code-section" style="
-        margin-top: 30px;
-        padding: 20px;
-        border-top: 1px solid #e2e8f0;
-        text-align: center;
-        page-break-inside: avoid;
-      ">
-        <div style="display: flex; align-items: center; justify-content: center; gap: 20px; flex-wrap: wrap;">
-          <div style="text-align: center;">
-            <img src="${qrCodeDataUrl}" alt="QR Code de vérification" style="
-              width: 120px;
-              height: 120px;
-              border: 2px solid #e2e8f0;
-              border-radius: 8px;
-              padding: 8px;
-              background: white;
-            "/>
-          </div>
-          <div style="
-            flex: 1;
-            min-width: 200px;
-            text-align: left;
-          ">
-            <h4 style="
-              color: #2c5282;
-              margin: 0 0 8px 0;
-              font-size: 14px;
-              font-weight: 600;
-            ">🔍 Vérification de l'authenticité</h4>
-            <p style="
-              margin: 0 0 6px 0;
-              font-size: 12px;
-              color: #4a5568;
-              line-height: 1.4;
-            ">Scannez ce QR code pour vérifier l'authenticité de cette facture</p>
-            <p style="
-              margin: 0;
-              font-size: 11px;
-              color: #718096;
-              font-family: 'Courier New', monospace;
-            ">N° ${invoiceNumber}</p>
-          </div>
-        </div>
-      </div>
-    `;
-
-    // Try to inject QR code before the closing body tag
-    if (htmlContent.includes("</body>")) {
-      return htmlContent.replace("</body>", qrCodeSection + "\n  </body>");
-    }
-
-    // Fallback: inject before closing div if no body tag
-    if (htmlContent.includes("</div>")) {
-      const lastDivIndex = htmlContent.lastIndexOf("</div>");
-      return (
-        htmlContent.slice(0, lastDivIndex) +
-        qrCodeSection +
-        "\n  " +
-        htmlContent.slice(lastDivIndex)
-      );
-    }
-
-    // Final fallback: append to end
-    return htmlContent + qrCodeSection;
-  } catch (error) {
-    console.error("[QR Code] Error injecting QR code into HTML:", error);
-    return htmlContent; // Return original content if injection fails
-  }
-}
+const puppeteer = require("puppeteer");
+const htmlPdf = require("html-pdf");
+const htmlPdfNode = require("html-pdf-node");
 
 /**
  * Log stock movement.
@@ -290,11 +158,11 @@ async function generateInvoiceNumber(
 
       // Rechercher la dernière proforma de l'année courante pour ce magasin
       const [orderRows] = await db.query(
-        `SELECT invoice_number FROM orders 
-         WHERE ${filterField} = ? 
-         AND order_type = ? 
-         AND invoice_number LIKE ? 
-         AND is_deleted = 0 
+        `SELECT invoice_number FROM orders
+         WHERE ${filterField} = ?
+         AND order_type = ?
+         AND invoice_number LIKE ?
+         AND is_deleted = 0
          ORDER BY id DESC LIMIT 1`,
         [filterValue, order_type, yearPattern]
       );
@@ -379,11 +247,11 @@ async function generateInvoiceNumber(
 
     // Rechercher la dernière facture de l'année pour déterminer la séquence
     const [orderRows] = await db.query(
-      `SELECT invoice_number FROM orders 
-       WHERE ${filterField} = ? 
-       AND order_type = ? 
-       AND invoice_number LIKE ? 
-       AND is_deleted = 0 
+      `SELECT invoice_number FROM orders
+       WHERE ${filterField} = ?
+       AND order_type = ?
+       AND invoice_number LIKE ?
+       AND is_deleted = 0
        ORDER BY id DESC LIMIT 1`,
       [filterValue, order_type, yearPattern]
     );
@@ -400,69 +268,38 @@ async function generateInvoiceNumber(
       }
     }
 
-    // Rechercher un numéro unique
     let isUnique = false;
     let maxAttempts = 100;
     let attempts = 0;
     let invoiceNumber;
-
     while (!isUnique && attempts < maxAttempts) {
       const sequenceStr = sequence.toString().padStart(4, "0");
       invoiceNumber = `${prefix}${month}${year}-${sequenceStr}`;
 
-      // Vérifier que le numéro généré est unique
       const [existingInvoice] = await db.query(
-        "SELECT id FROM orders WHERE invoice_number = ? AND is_deleted = 0 LIMIT 1",
-        [invoiceNumber]
+        `SELECT id FROM orders WHERE invoice_number = ? AND is_deleted = 0 AND ${filterField} = ? LIMIT 1`,
+        [invoiceNumber, filterValue]
       );
 
       if (existingInvoice.length === 0) {
         isUnique = true;
       } else {
-        console.warn(
-          `Numéro de facture ${invoiceNumber} déjà utilisé, incrémentation de la séquence (tentative ${
-            attempts + 1
-          }/${maxAttempts})`
-        );
         sequence++;
         attempts++;
       }
     }
 
     if (!isUnique) {
-      // Si après maxAttempts tentatives, on n'a toujours pas de numéro unique,
-      // générer un numéro avec un timestamp pour garantir l'unicité
       const timestamp = Date.now();
       invoiceNumber = `${prefix}${month}${year}-${timestamp
         .toString()
         .slice(-8)}`;
-      console.warn(
-        `Impossible de trouver un numéro de facture unique après ${maxAttempts} tentatives, utilisation d'un timestamp: ${invoiceNumber}`
-      );
     }
 
     return invoiceNumber;
   } catch (error) {
-    console.error("Erreur lors de la génération du numéro de facture:", error);
-    // Fallback en cas d'erreur - générer un numéro unique basé sur timestamp
-    const dateObj = new Date(order_date);
-    const month = ("0" + (dateObj.getMonth() + 1)).slice(-2);
-    const year = dateObj.getFullYear();
-    const timestamp = Date.now();
-
-    // Préfixe par défaut selon le type de commande
-    let fallbackPrefix;
-    if (order_type === "purchase") {
-      fallbackPrefix = "ACHT";
-    } else if (order_type === "proforma") {
-      fallbackPrefix = "PF";
-    } else {
-      fallbackPrefix = "SALE";
-    }
-
-    return `${fallbackPrefix}${month}${year}-ERR${timestamp
-      .toString()
-      .slice(-4)}`;
+    console.error("Error generating invoice number:", error);
+    throw error;
   }
 }
 
@@ -3348,23 +3185,6 @@ router.post("/generate-proforma-pdf-v2", async (req, res) => {
         .json({ error: "Les données de proforma sont requises" });
     }
 
-    // Generate QR code for proforma verification
-    let qrCodeDataUrl = "";
-    if (orderData.invoice_number) {
-      try {
-        console.log(
-          `[Proforma PDF] Generating QR code for proforma: ${orderData.invoice_number}`
-        );
-        qrCodeDataUrl = await generateInvoiceQRCode(orderData.invoice_number);
-      } catch (qrError) {
-        console.warn(
-          `[Proforma PDF] QR code generation failed for ${orderData.invoice_number}:`,
-          qrError.message
-        );
-        // Continue without QR code rather than failing the entire PDF generation
-      }
-    }
-
     // Try html-pdf-node first (lightest and most reliable)
     try {
       const htmlPdf = require("html-pdf-node");
@@ -3392,18 +3212,6 @@ router.post("/generate-proforma-pdf-v2", async (req, res) => {
         htmlContent = generateSimpleProformaHTML(orderData);
       } else {
         console.log("Using provided HTML template from client");
-      }
-
-      // Inject QR code into HTML content
-      if (qrCodeDataUrl && orderData.invoice_number) {
-        console.log(
-          `[Proforma PDF] Injecting QR code into HTML for proforma: ${orderData.invoice_number}`
-        );
-        htmlContent = injectQRCodeIntoHTML(
-          htmlContent,
-          qrCodeDataUrl,
-          orderData.invoice_number
-        );
       }
 
       const file = { content: htmlContent };
@@ -3450,18 +3258,6 @@ router.post("/generate-proforma-pdf-v2", async (req, res) => {
         let htmlContent = orderData.htmlContent;
         if (!htmlContent) {
           htmlContent = generateSimpleProformaHTML(orderData);
-        }
-
-        // Inject QR code into HTML content for proforma html-pdf fallback
-        if (qrCodeDataUrl && orderData.invoice_number) {
-          console.log(
-            `[Proforma PDF] Injecting QR code into HTML (html-pdf fallback) for proforma: ${orderData.invoice_number}`
-          );
-          htmlContent = injectQRCodeIntoHTML(
-            htmlContent,
-            qrCodeDataUrl,
-            orderData.invoice_number
-          );
         }
 
         console.log("Generating proforma PDF with html-pdf...");
@@ -3514,18 +3310,6 @@ router.post("/generate-proforma-pdf-v2", async (req, res) => {
         let htmlContent = orderData.htmlContent;
         if (!htmlContent) {
           htmlContent = generateSimpleProformaHTML(orderData);
-        }
-
-        // Inject QR code into HTML content for proforma puppeteer fallback
-        if (qrCodeDataUrl && orderData.invoice_number) {
-          console.log(
-            `[Proforma PDF] Injecting QR code into HTML (puppeteer fallback) for proforma: ${orderData.invoice_number}`
-          );
-          htmlContent = injectQRCodeIntoHTML(
-            htmlContent,
-            qrCodeDataUrl,
-            orderData.invoice_number
-          );
         }
 
         console.log("Generating proforma PDF with puppeteer fallback...");
@@ -3848,23 +3632,6 @@ router.post("/generate-sale-invoice-pdf-v2", async (req, res) => {
         .json({ error: "Les données de commande sont requises" });
     }
 
-    // Generate QR code for invoice verification
-    let qrCodeDataUrl = "";
-    if (orderData.invoice_number) {
-      try {
-        console.log(
-          `[Invoice PDF] Generating QR code for invoice: ${orderData.invoice_number}`
-        );
-        qrCodeDataUrl = await generateInvoiceQRCode(orderData.invoice_number);
-      } catch (qrError) {
-        console.warn(
-          `[Invoice PDF] QR code generation failed for ${orderData.invoice_number}:`,
-          qrError.message
-        );
-        // Continue without QR code rather than failing the entire PDF generation
-      }
-    }
-
     // Try html-pdf-node first (lightest and most reliable)
     try {
       const htmlPdf = require("html-pdf-node");
@@ -3892,18 +3659,6 @@ router.post("/generate-sale-invoice-pdf-v2", async (req, res) => {
         htmlContent = generateSimpleInvoiceHTML(orderData);
       } else {
         console.log("Using provided HTML template from client");
-      }
-
-      // Inject QR code into HTML content
-      if (qrCodeDataUrl && orderData.invoice_number) {
-        console.log(
-          `[Invoice PDF] Injecting QR code into HTML for invoice: ${orderData.invoice_number}`
-        );
-        htmlContent = injectQRCodeIntoHTML(
-          htmlContent,
-          qrCodeDataUrl,
-          orderData.invoice_number
-        );
       }
 
       const file = { content: htmlContent };
@@ -3950,18 +3705,6 @@ router.post("/generate-sale-invoice-pdf-v2", async (req, res) => {
         let htmlContent = orderData.htmlContent;
         if (!htmlContent) {
           htmlContent = generateSimpleInvoiceHTML(orderData);
-        }
-
-        // Inject QR code into HTML content for html-pdf fallback
-        if (qrCodeDataUrl && orderData.invoice_number) {
-          console.log(
-            `[Invoice PDF] Injecting QR code into HTML (html-pdf fallback) for invoice: ${orderData.invoice_number}`
-          );
-          htmlContent = injectQRCodeIntoHTML(
-            htmlContent,
-            qrCodeDataUrl,
-            orderData.invoice_number
-          );
         }
 
         console.log("Generating PDF with html-pdf...");
@@ -4014,18 +3757,6 @@ router.post("/generate-sale-invoice-pdf-v2", async (req, res) => {
         let htmlContent = orderData.htmlContent;
         if (!htmlContent) {
           htmlContent = generateSimpleInvoiceHTML(orderData);
-        }
-
-        // Inject QR code into HTML content for puppeteer fallback
-        if (qrCodeDataUrl && orderData.invoice_number) {
-          console.log(
-            `[Invoice PDF] Injecting QR code into HTML (puppeteer fallback) for invoice: ${orderData.invoice_number}`
-          );
-          htmlContent = injectQRCodeIntoHTML(
-            htmlContent,
-            qrCodeDataUrl,
-            orderData.invoice_number
-          );
         }
 
         console.log("Generating PDF with puppeteer fallback...");
@@ -4429,5 +4160,328 @@ function generateSimpleInvoiceHTML(orderData) {
     </html>
   `;
 }
+
+router.post("/generate-sale-invoice-pdf-v2", async (req, res) => {
+  const { orderId, useEnhancedTemplate } = req.body; // <-- Add useEnhancedTemplate
+  console.log(
+    `[PDF V2] Received request for Order ID: ${orderId} | Enhanced: ${useEnhancedTemplate}`
+  );
+
+  try {
+    // 1. Fetch all required data (order, client, warehouse, etc.)
+    const [orderRows] = await db.query(
+      `SELECT o.*, c.name as company_name, c.address as company_address, c.phone as company_phone, c.email as company_email,
+                w.name as warehouse_name, w.address as warehouse_address, w.phone as warehouse_phone, w.email as warehouse_email,
+                op.amount as total, op.payment_mode_id, op.payment_date, op.remarks, op.payment_id,
+                p.name as product_name, p.code as product_code, p.unit_price, p.tax_id, p.tax_rate, p.discount_rate,
+                oi.quantity, oi.unit_id, oi.original_order_id, oi.original_order_item_id,
+                u.name as user_name, u.phone as user_phone, u.email as user_email, u.address as user_address,
+                s.name as staff_name, s.phone as staff_phone, s.email as staff_email,
+                t.name as tax_name, t.rate as tax_rate
+         FROM orders o
+         LEFT JOIN companies c ON o.company_id = c.id
+         LEFT JOIN warehouses w ON o.warehouse_id = w.id
+         LEFT JOIN order_items oi ON o.id = oi.order_id
+         LEFT JOIN products p ON oi.product_id = p.id
+         LEFT JOIN taxes t ON p.tax_id = t.id
+         LEFT JOIN payment_modes pm ON op.payment_mode_id = pm.id
+         LEFT JOIN order_payments op ON o.id = op.order_id
+         LEFT JOIN users u ON o.user_id = u.id
+         LEFT JOIN users s ON o.staff_user_id = s.id
+         WHERE o.id = ?`,
+      [orderId]
+    );
+
+    if (orderRows.length === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = orderRows[0];
+
+    // 2. Calculate totals
+    const totalWithoutTax = order.subtotal + order.discount;
+    const totalTaxAmount = totalWithoutTax * (order.tax_rate / 100);
+    const totalDiscountAmount = totalWithoutTax * (order.discount_rate / 100);
+
+    // 3. Prepare data object for the template
+    const templateData = {
+      order,
+      clientObj: {
+        name: order.user_name || "Client inconnu",
+        phone: order.user_phone,
+        email: order.user_email,
+        address: order.user_address,
+      },
+      warehouse: {
+        name: order.warehouse_name,
+        address: order.warehouse_address,
+        phone: order.warehouse_phone,
+        email: order.warehouse_email,
+      },
+      paymentStatus: translatePaymentStatus(order.payment_status),
+      montantVerse: order.paid_amount || 0,
+      montantDu: order.due_amount || 0,
+      totals: {
+        subtotal: totalWithoutTax,
+        totalTax: totalTaxAmount,
+        totalDiscount: totalDiscountAmount,
+        total: order.total,
+      },
+      formattedDate: new Date(order.order_date).toLocaleDateString("fr-FR"),
+      formatNumber: (num) => num.toLocaleString("fr-FR"),
+      // Add new data points for the enhanced template
+      qrCodeImage: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA...", // Example QR, replace with real one
+      dueDate: "30/11/2023", // Example due date
+    };
+
+    // 4. Select the template and generate HTML
+    let htmlContent;
+    if (useEnhancedTemplate) {
+      console.log("[PDF V2] Using Enhanced Invoice Template");
+      htmlContent = generateEnhancedInvoiceHTML(templateData);
+    } else {
+      console.log("[PDF V2] Using Standard Invoice Template");
+      htmlContent = generateInvoiceHTML(templateData);
+    }
+
+    // 5. Define file path
+    const fileName = `facture_${order.invoice_number}_${Date.now()}.pdf`;
+
+    // Create a new page with more memory
+    const puppeteer = require("puppeteer");
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-web-security",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-dev-shm-usage",
+      ],
+    });
+    const page = await browser.newPage();
+
+    // Set content of the page to our HTML with more time to load resources
+    await page.setContent(htmlContent, {
+      waitUntil: ["networkidle0", "domcontentloaded"],
+      timeout: 60000, // Plus de temps pour le chargement (60 sec)
+    });
+
+    // Ajouter un petit délai pour s'assurer que tout est rendu (remplacement de waitForTimeout)
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Generate PDF with improved settings
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: {
+        top: "10mm",
+        right: "10mm",
+        bottom: "10mm",
+        left: "10mm",
+      },
+      preferCSSPageSize: true,
+      displayHeaderFooter: false,
+      scale: 0.98, // Légère réduction pour éviter coupures
+      timeout: 60000, // Plus de temps pour la génération (60 sec)
+    });
+
+    // Close the browser
+    await browser.close();
+
+    // Set headers for PDF response with more explicit content type
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", pdfBuffer.length);
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    // Désactiver le cache pour éviter les problèmes
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+
+    // Send the PDF as response directly
+    return res.end(pdfBuffer);
+  } catch (error) {
+    console.error("Erreur lors de la génération du PDF:", error);
+    return res.status(500).json({
+      error: "Erreur lors de la génération du PDF",
+      details: error.message,
+      stack: error.stack,
+    });
+  }
+});
+
+async function getOrderDetails(orderId) {
+  const [orderRows] = await db.query(
+    `SELECT o.*,
+            c.name AS client_name, c.phone AS client_phone, c.email AS client_email, c.address AS client_address,
+            w.name AS warehouse_name, w.address AS warehouse_address, w.phone AS warehouse_phone, w.email AS warehouse_email,
+            w.website AS warehouse_website, w.tax_number AS warehouse_tax_number, w.rccm_number AS warehouse_rccm_number,
+            w.registration_number AS warehouse_registration_number, w.capital_social AS warehouse_capital_social,
+            w.terms_condition AS warehouse_terms_condition, w.bank_details AS warehouse_bank_details,
+            w.logo AS warehouse_logo
+     FROM orders o
+     LEFT JOIN users c ON o.client_id = c.id
+     LEFT JOIN warehouses w ON o.warehouse_id = w.id
+     WHERE o.id = ?`,
+    [orderId]
+  );
+
+  if (orderRows.length === 0) {
+    return null;
+  }
+  const order = orderRows[0];
+
+  const [itemRows] = await db.query(
+    `SELECT oi.*, p.name AS product_name, u.short_name AS unit_short_name
+     FROM order_items oi
+     JOIN products p ON oi.product_id = p.id
+     LEFT JOIN units u ON oi.unit_id = u.id
+     WHERE oi.order_id = ?`,
+    [orderId]
+  );
+  order.produitsVendus = itemRows;
+
+  return order;
+}
+
+function translatePaymentStatus(status) {
+  if (status === "paid") return "Payé";
+  if (status === "partially_paid") return "Partiellement Payé";
+  if (status === "unpaid") return "Non Payé";
+  return status;
+}
+
+// ====================================================================
+// NEW V2 INVOICE/PROFORMA GENERATION ROUTES
+// ====================================================================
+
+router.post("/generate-sale-invoice-pdf-v2", async (req, res) => {
+  const { orderId, useEnhancedTemplate } = req.body;
+  console.log(
+    `[PDF V2] Invoice request for Order ID: ${orderId}, Enhanced: ${useEnhancedTemplate}`
+  );
+
+  try {
+    const orderData = await getOrderDetails(orderId);
+    if (!orderData) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Commande non trouvée." });
+    }
+
+    const clientObj = {
+      name: orderData.client_name,
+      address: orderData.client_address,
+      phone: orderData.client_phone,
+      email: orderData.client_email,
+    };
+
+    const warehouse = {
+      name: orderData.warehouse_name,
+      address: orderData.warehouse_address,
+      phone: orderData.warehouse_phone,
+      email: orderData.warehouse_email,
+      website: orderData.warehouse_website,
+      tax_number: orderData.warehouse_tax_number,
+      rccm_number: orderData.warehouse_rccm_number,
+      registration_number: orderData.warehouse_registration_number,
+      capital_social: orderData.warehouse_capital_social,
+      terms_condition: orderData.warehouse_terms_condition,
+      bank_details: orderData.warehouse_bank_details,
+      logo: orderData.warehouse_logo,
+    };
+
+    const totals = {
+      subtotal: parseFloat(orderData.subtotal) || 0,
+      totalDiscount: parseFloat(orderData.discount) || 0,
+      totalTax: parseFloat(orderData.tax) || 0,
+      total: parseFloat(orderData.total_amount) || 0,
+    };
+
+    const templateData = {
+      order: orderData,
+      clientObj,
+      warehouse,
+      paymentStatus: translatePaymentStatus(orderData.payment_status),
+      montantVerse: parseFloat(orderData.paid_amount) || 0,
+      montantDu:
+        (parseFloat(orderData.total_amount) || 0) -
+        (parseFloat(orderData.paid_amount) || 0),
+      totals,
+      formattedDate: new Date(orderData.order_date).toLocaleDateString("fr-FR"),
+      formatNumber: (num) => (num || 0).toLocaleString("fr-FR"),
+      qrCodeImage: null, // This should be generated dynamically
+      dueDate: new Date(
+        Date.now() + 30 * 24 * 60 * 60 * 1000
+      ).toLocaleDateString("fr-FR"),
+    };
+
+    const htmlContent = useEnhancedTemplate
+      ? generateEnhancedInvoiceHTML(templateData)
+      : generateInvoiceHTML(templateData);
+
+    const fileName = `facture_${orderData.invoice_number}_${Date.now()}.pdf`;
+    const filePath = path.join(__dirname, "../public/invoices", fileName);
+    await fs.ensureDir(path.dirname(filePath));
+
+    // --- Fallback PDF Generation ---
+    try {
+      console.log("[PDF V2] Attempting generation with html-pdf-node...");
+      await htmlPdfNode.generatePdf(
+        { content: htmlContent },
+        { format: "A4", path: filePath, printBackground: true }
+      );
+      console.log("[PDF V2] Success with html-pdf-node.");
+    } catch (error1) {
+      console.warn("[PDF V2] html-pdf-node failed:", error1.message);
+      try {
+        console.log("[PDF V2] Attempting fallback to html-pdf...");
+        await new Promise((resolve, reject) => {
+          htmlPdf
+            .create(htmlContent, {
+              format: "A4",
+              border: {
+                top: "10mm",
+                right: "10mm",
+                bottom: "10mm",
+                left: "10mm",
+              },
+              header: { height: "0mm" },
+              footer: { height: "0mm" },
+            })
+            .toFile(filePath, (err, result) => {
+              if (err) return reject(err);
+              resolve(result);
+            });
+        });
+        console.log("[PDF V2] Success with html-pdf.");
+      } catch (error2) {
+        console.warn("[PDF V2] html-pdf also failed:", error2.message);
+        console.log("[PDF V2] Attempting final fallback to Puppeteer...");
+        const browser = await puppeteer.launch({
+          args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        });
+        const page = await browser.newPage();
+        await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+        await page.pdf({
+          path: filePath,
+          format: "A4",
+          printBackground: true,
+        });
+        await browser.close();
+        console.log("[PDF V2] Success with Puppeteer.");
+      }
+    }
+
+    res.json({ success: true, filePath: `/invoices/${fileName}` });
+  } catch (error) {
+    console.error("[PDF V2] Critical error during PDF generation:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur serveur lors de la génération du PDF.",
+      error: error.message,
+    });
+  }
+});
 
 module.exports = router;

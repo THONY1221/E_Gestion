@@ -373,7 +373,14 @@ router.post("/transfers", async (req, res) => {
 // GET /api/stock/adjustments
 // Fetch stock adjustments for a specific warehouse
 router.get("/adjustments", async (req, res) => {
-  const { warehouse_id, dateDebut, dateFin, page = 1, limit = 10 } = req.query;
+  const {
+    warehouse_id,
+    product_id,
+    start_date,
+    end_date,
+    page = 1,
+    limit = 10,
+  } = req.query;
 
   if (!warehouse_id) {
     return res.status(400).json({ error: "Warehouse ID is required." });
@@ -395,7 +402,9 @@ router.get("/adjustments", async (req, res) => {
             sa.adjustment_type, -- 'add' or 'subtract'
             sa.notes,
             sa.created_at,
-            u.name as created_by_user
+            sa.updated_at,
+            u.name as user_name,
+            sa.is_deletable
         FROM stock_adjustments sa
         JOIN warehouses w ON sa.warehouse_id = w.id
         JOIN products p ON sa.product_id = p.id
@@ -411,11 +420,18 @@ router.get("/adjustments", async (req, res) => {
     `;
     const countParams = [warehouseIdNum];
 
-    if (dateDebut && dateFin) {
+    if (product_id) {
+      sql += " AND sa.product_id = ?";
+      countSql += " AND sa.product_id = ?";
+      params.push(Number(product_id));
+      countParams.push(Number(product_id));
+    }
+
+    if (start_date && end_date) {
       sql += " AND DATE(sa.created_at) BETWEEN ? AND ?";
       countSql += " AND DATE(sa.created_at) BETWEEN ? AND ?";
-      params.push(dateDebut, dateFin);
-      countParams.push(dateDebut, dateFin);
+      params.push(start_date, end_date);
+      countParams.push(start_date, end_date);
     }
 
     sql += " ORDER BY sa.created_at DESC, sa.id DESC LIMIT ? OFFSET ?";
@@ -437,6 +453,44 @@ router.get("/adjustments", async (req, res) => {
   }
 });
 
+// GET /api/stock/adjustments/:id
+// Get a specific stock adjustment by ID
+router.get("/adjustments/:id", async (req, res) => {
+  const { id } = req.params;
+  const adjustmentId = parseInt(id);
+
+  if (isNaN(adjustmentId)) {
+    return res.status(400).json({ error: "Invalid adjustment ID" });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    const sql = `
+      SELECT sa.*, p.name as product_name, w.name as warehouse_name, u.name as user_name
+      FROM stock_adjustments sa
+      JOIN products p ON sa.product_id = p.id
+      JOIN warehouses w ON sa.warehouse_id = w.id
+      LEFT JOIN users u ON sa.created_by = u.id
+      WHERE sa.id = ?
+    `;
+    const [rows] = await connection.query(sql, [adjustmentId]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Stock adjustment not found" });
+    }
+
+    res.json({ adjustment: rows[0] });
+  } catch (err) {
+    console.error("Error fetching stock adjustment by ID:", err);
+    res.status(500).json({
+      error: "Error fetching stock adjustment details.",
+      details: err.message,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 // POST /api/stock/adjustments
 // Create a new stock adjustment
 router.post("/adjustments", async (req, res) => {
@@ -447,8 +501,10 @@ router.post("/adjustments", async (req, res) => {
     quantity,
     adjustment_type, // 'add' or 'subtract'
     notes,
-    created_by, // user ID
   } = req.body;
+
+  // Get user from request (if authentication middleware is used)
+  const created_by = req.user?.id || null;
 
   if (
     !company_id ||
@@ -476,8 +532,8 @@ router.post("/adjustments", async (req, res) => {
     const [adjResult] = await connection.query(
       `INSERT INTO stock_adjustments (
           company_id, warehouse_id, product_id, quantity, adjustment_type,
-          notes, created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          notes, created_by, is_deletable, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())`,
       [
         company_id,
         warehouse_id,
@@ -543,6 +599,194 @@ router.post("/adjustments", async (req, res) => {
     console.error("Error creating stock adjustment:", err);
     res.status(500).json({
       error: "Failed to create stock adjustment.",
+      details: err.message,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// PUT /api/stock/adjustments/:id
+// Update an existing stock adjustment
+router.put("/adjustments/:id", async (req, res) => {
+  const { id } = req.params;
+  const adjustmentId = Number(id);
+  const {
+    quantity, // New positive quantity
+    adjustment_type, // New type ('add' or 'subtract')
+    notes,
+  } = req.body;
+
+  // Validation
+  const newQuantity = parseFloat(quantity);
+  if (isNaN(newQuantity) || newQuantity <= 0) {
+    return res
+      .status(400)
+      .json({ error: "Invalid quantity. Must be positive." });
+  }
+  if (!["add", "subtract"].includes(adjustment_type)) {
+    return res.status(400).json({ error: "Invalid adjustment type." });
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // Get old adjustment details
+    const [adjRows] = await connection.query(
+      "SELECT * FROM stock_adjustments WHERE id = ?",
+      [adjustmentId]
+    );
+    if (adjRows.length === 0) {
+      return res.status(404).json({ error: "Stock adjustment not found." });
+    }
+
+    const oldAdjustment = adjRows[0];
+    const oldQuantity = parseFloat(oldAdjustment.quantity);
+    const oldType = oldAdjustment.adjustment_type;
+    const productId = oldAdjustment.product_id;
+    const warehouseId = oldAdjustment.warehouse_id;
+
+    // Calculate old stock effect and new stock effect
+    const oldStockEffect = oldType === "add" ? oldQuantity : -oldQuantity;
+    const newStockEffect =
+      adjustment_type === "add" ? newQuantity : -newQuantity;
+    const netStockChange = newStockEffect - oldStockEffect; // The delta to apply to current stock
+
+    // Update the adjustment record
+    await connection.query(
+      `UPDATE stock_adjustments
+       SET quantity = ?, adjustment_type = ?, notes = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [newQuantity, adjustment_type, notes, adjustmentId]
+    );
+
+    // Apply net stock change
+    if (netStockChange !== 0) {
+      const [updateResult] = await connection.query(
+        `UPDATE product_details
+         SET current_stock = current_stock + ?
+         WHERE product_id = ? AND warehouse_id = ?`,
+        [netStockChange, productId, warehouseId]
+      );
+
+      if (updateResult.affectedRows === 0) {
+        throw new Error(
+          `Failed to update stock for product ID ${productId} in warehouse ${warehouseId}.`
+        );
+      }
+
+      // Log the net stock movement
+      await logStockMovement(
+        connection,
+        productId,
+        netStockChange,
+        "stock_adjustment",
+        adjustmentId,
+        "stock_adjustments",
+        warehouseId,
+        `Adjustment Update: ${adjustment_type} ${newQuantity}. Net change: ${netStockChange}. Notes: ${
+          notes || ""
+        }`
+      );
+    }
+
+    await connection.commit();
+    res.json({
+      message: "Stock adjustment updated successfully.",
+      adjustmentId: adjustmentId,
+    });
+  } catch (err) {
+    await connection.rollback();
+    console.error("Error updating stock adjustment:", err);
+    res.status(500).json({
+      error: "Failed to update stock adjustment.",
+      details: err.message,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// DELETE /api/stock/adjustments/:id
+// Delete a stock adjustment and reverse the stock change
+router.delete("/adjustments/:id", async (req, res) => {
+  const { id } = req.params;
+  const adjustmentId = Number(id);
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // Get adjustment details
+    const [adjRows] = await connection.query(
+      "SELECT * FROM stock_adjustments WHERE id = ?",
+      [adjustmentId]
+    );
+    if (adjRows.length === 0) {
+      return res.status(404).json({ error: "Stock adjustment not found." });
+    }
+
+    const adjustment = adjRows[0];
+    if (adjustment.is_deletable === 0) {
+      return res.status(403).json({
+        error:
+          "This adjustment cannot be deleted as it may be referenced by other transactions.",
+      });
+    }
+
+    const quantity = parseFloat(adjustment.quantity);
+    const adjustmentType = adjustment.adjustment_type;
+    const productId = adjustment.product_id;
+    const warehouseId = adjustment.warehouse_id;
+
+    // Calculate reverse stock change
+    const reverseStockChange = adjustmentType === "add" ? -quantity : quantity;
+
+    // Apply reverse stock change
+    const [updateResult] = await connection.query(
+      `UPDATE product_details
+       SET current_stock = current_stock + ?
+       WHERE product_id = ? AND warehouse_id = ?`,
+      [reverseStockChange, productId, warehouseId]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      throw new Error(
+        `Failed to reverse stock change for product ID ${productId} in warehouse ${warehouseId}.`
+      );
+    }
+
+    // Log the reversal
+    await logStockMovement(
+      connection,
+      productId,
+      reverseStockChange,
+      "stock_adjustment",
+      adjustmentId,
+      "stock_adjustments",
+      warehouseId,
+      `Adjustment Reversal: Original ${adjustmentType} ${quantity} reversed. Notes: ${
+        adjustment.notes || ""
+      }`
+    );
+
+    // Delete the adjustment
+    await connection.query("DELETE FROM stock_adjustments WHERE id = ?", [
+      adjustmentId,
+    ]);
+
+    await connection.commit();
+    res.json({
+      message:
+        "Stock adjustment deleted successfully and stock has been reversed.",
+      adjustmentId: adjustmentId,
+    });
+  } catch (err) {
+    await connection.rollback();
+    console.error("Error deleting stock adjustment:", err);
+    res.status(500).json({
+      error: "Failed to delete stock adjustment.",
       details: err.message,
     });
   } finally {
