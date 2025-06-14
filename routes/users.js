@@ -53,21 +53,22 @@ router.get("/", async (req, res) => {
       SELECT
         u.id, u.name, u.email, u.phone, u.company_id, u.role_id, u.user_type, u.status, u.profile_image, u.address, u.shipping_address, u.timezone, u.created_at, u.updated_at,
         r.name as role_name,
-        IF(u.user_type = 'staff_members',
-           (SELECT w.name
-            FROM user_warehouse uw
-            JOIN warehouses w ON uw.warehouse_id = w.id
-            WHERE uw.user_id = u.id
-            ORDER BY uw.id ASC
-            LIMIT 1),
-           w_single.name
-        ) as assigned_warehouse_name,
+        CASE
+          WHEN u.user_type = 'staff_members' THEN
+            (SELECT w.name
+             FROM user_warehouse uw
+             JOIN warehouses w ON uw.warehouse_id = w.id
+             WHERE uw.user_id = u.id
+             ORDER BY uw.id ASC
+             LIMIT 1)
+          ELSE
+            (SELECT w.name FROM warehouses w JOIN user_details ud ON w.id = ud.warehouse_id WHERE ud.user_id = u.id)
+        END as assigned_warehouse_name,
          ud.id as user_detail_id,
          ud.opening_balance, ud.opening_balance_type, ud.rccm, ud.ifu, ud.credit_period, ud.credit_limit
       FROM users u
       LEFT JOIN roles r ON u.role_id = r.id
       LEFT JOIN user_details ud ON u.id = ud.user_id
-      LEFT JOIN warehouses w_single ON ud.warehouse_id = w_single.id AND u.user_type != 'staff_members'
       WHERE 1=1
     `;
     const params = [];
@@ -932,221 +933,45 @@ router.get("/customers", async (req, res) => {
   }
 });
 
-// GET /api/users/:id - Récupérer un utilisateur par ID (RESTRUCTURED)
+// GET /api/users/:id - Récupérer un utilisateur par son ID
 router.get("/:id", async (req, res) => {
-  console.log(`[API GET /users/:id] Request received for ID: ${req.params.id}`);
-  let connection;
   try {
     const { id } = req.params;
-    const requestedUserId = parseInt(id);
-    console.log(
-      `[API GET /users/:id] Parsed requestedUserId: ${requestedUserId}`
-    );
 
-    if (isNaN(requestedUserId)) {
-      console.error(
-        `[API GET /users/:id] Invalid ID parameter received: ${id}`
-      );
-      return res.status(400).json({ error: "ID utilisateur invalide." });
-    }
-
-    connection = await db.getConnection(); // Get connection inside try block
-
-    // 1. Fetch main user data first
+    // Étape 1: Récupérer les informations de base de l'utilisateur et son rôle
     const userQuery = `
       SELECT
-        u.id, u.name, u.email, u.phone, u.company_id, u.role_id, u.user_type, u.status, u.profile_image, u.address, u.shipping_address, u.timezone, u.created_at, u.updated_at,
-        u.is_superadmin,
-        r.name as role_name,
-        ud.opening_balance, ud.opening_balance_type, ud.rccm, ud.ifu, ud.credit_period, ud.credit_limit, ud.warehouse_id as detail_warehouse_id 
+        u.id, u.name, u.email, u.phone, u.company_id, u.status, u.profile_image,
+        u.address, u.shipping_address, u.timezone,
+        r.name as role_name
       FROM users u
       LEFT JOIN roles r ON u.role_id = r.id
-      LEFT JOIN user_details ud ON u.id = ud.user_id 
-      WHERE u.id = ?
+      WHERE u.id = $1
     `;
-    const [userRows] = await connection.query(userQuery, [requestedUserId]);
+    const userResult = await db.query(userQuery, [id]);
 
-    // 2. Validate fetched user
-    if (userRows.length === 0) {
-      console.warn(
-        `[API GET /users/:id] User not found for ID: ${requestedUserId}`
-      );
-      if (connection) connection.release(); // Release connection before returning
+    if (userResult.rows.length === 0) {
       return res.status(404).json({ error: "Utilisateur non trouvé" });
     }
+    const user = userResult.rows[0];
 
-    const user = userRows[0];
+    // Étape 2: Récupérer les magasins assignés
+    const warehousesQuery = `
+      SELECT w.id, w.name, w.city, w.email, w.phone
+      FROM user_warehouse uw
+      JOIN warehouses w ON uw.warehouse_id = w.id
+      WHERE uw.user_id = $1
+    `;
+    const warehousesResult = await db.query(warehousesQuery, [id]);
+    user.assigned_warehouses = warehousesResult.rows;
 
-    // **CRUCIAL CHECK:** Ensure the fetched user's ID matches the requested ID
-    if (user.id !== requestedUserId) {
-      console.error(
-        `[API GET /users/:id] FATAL ID MISMATCH! Requested ${requestedUserId}, but DB returned ID ${user.id}.`
-      );
-      if (connection) connection.release(); // Release connection before returning
-      return res.status(500).json({
-        error:
-          "Erreur interne du serveur lors de la récupération de l'utilisateur.",
-      });
-    }
-    console.log(
-      `[API GET /users/:id] Successfully fetched and validated user for ID: ${user.id}`
-    );
-
-    // *** ADD LOGGING HERE TO CHECK is_superadmin ***
-    console.log(
-      `[API GET /users/:id] User ${user.id} raw data check: is_superadmin = ${
-        user.is_superadmin
-      } (Type: ${typeof user.is_superadmin})`
-    );
-
-    // 3. Fetch assigned warehouses if the user is validated
-    let assignedWarehousesDetails = [];
-
-    // --- NEW: SysAdmin Warehouse Access ---
-    if (user.is_superadmin === 1) {
-      // *** ADD LOGGING HERE ***
-      console.log(
-        `[API GET /users/:id] Entering SysAdmin block for user ${user.id}.`
-      );
-
-      console.log(
-        `[API GET /users/:id] User ${user.id} is SysAdmin. Fetching ALL warehouses.`
-      );
-      const allWarehouseQuery = `
-            SELECT 
-              w.id, 
-              w.name,
-              w.company_id,
-              c.name as company_name
-            FROM warehouses w
-            JOIN companies c ON w.company_id = c.id
-            ORDER BY c.name ASC, w.name ASC
-        `;
-      const [allWarehouseRows] = await connection.query(allWarehouseQuery);
-      assignedWarehousesDetails = allWarehouseRows;
-      console.log(
-        `[API GET /users/:id] Found ${assignedWarehousesDetails.length} total warehouses for SysAdmin.`
-      );
-    }
-    // --- END NEW ---
-    else if (user.user_type === "staff_members") {
-      // *** ADD LOGGING HERE ***
-      console.log(
-        `[API GET /users/:id] Entering Staff block for user ${user.id}.`
-      );
-
-      // --- Original Staff Logic ---
-      console.log(
-        `[API GET /users/:id] User ${user.id} is Staff. Fetching assigned warehouses.`
-      );
-      const warehouseQuery = `
-            SELECT 
-              uw.warehouse_id as id, 
-              w.name,
-              w.company_id,
-              c.name as company_name
-            FROM user_warehouse uw
-            JOIN warehouses w ON uw.warehouse_id = w.id
-            JOIN companies c ON w.company_id = c.id
-            WHERE uw.user_id = ?
-            ORDER BY c.name ASC, w.name ASC
-        `;
-      const [warehouseRows] = await connection.query(warehouseQuery, [user.id]);
-      assignedWarehousesDetails = warehouseRows;
-      console.log(
-        `[API GET /users/:id] Found ${assignedWarehousesDetails.length} assigned warehouses for Staff user ${user.id}.`
-      );
-      // --- End Original Staff Logic ---
-    } else {
-      // *** ADD LOGGING HERE ***
-      console.log(
-        `[API GET /users/:id] Entering Non-Staff/Non-SysAdmin block for user ${user.id}.`
-      );
-
-      // --- Original Non-Staff Logic ---
-      console.log(
-        `[API GET /users/:id] User ${user.id} is Non-Staff (${user.user_type}). Checking detail_warehouse_id.`
-      );
-      if (user.detail_warehouse_id) {
-        const [whDetailsRow] = await connection.query(
-          "SELECT w.name, w.company_id, c.name as company_name FROM warehouses w JOIN companies c ON w.company_id = c.id WHERE w.id = ?",
-          [user.detail_warehouse_id]
-        );
-        if (whDetailsRow.length > 0) {
-          assignedWarehousesDetails = [
-            {
-              id: user.detail_warehouse_id,
-              name: whDetailsRow[0].name,
-              company_id: whDetailsRow[0].company_id,
-              company_name: whDetailsRow[0].company_name,
-            },
-          ];
-          console.log(
-            `[API GET /users/:id] Found warehouse assignment via detail_warehouse_id for Non-Staff user ${user.id}.`
-          );
-        } else {
-          console.log(
-            `[API GET /users/:id] detail_warehouse_id ${user.detail_warehouse_id} not found for Non-Staff user ${user.id}.`
-          );
-        }
-      } else {
-        console.log(
-          `[API GET /users/:id] No detail_warehouse_id found for Non-Staff user ${user.id}. No warehouses assigned.`
-        );
-      }
-      // --- End Original Non-Staff Logic ---
-    }
-
-    // 4. Construct final result explicitly
-    const result = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      company_id: user.company_id, // Base company_id from users table
-      role_id: user.role_id,
-      role_name: user.role_name,
-      user_type: user.user_type,
-      status: user.status,
-      profile_image: user.profile_image,
-      address: user.address,
-      shipping_address: user.shipping_address,
-      timezone: user.timezone,
-      created_at: user.created_at,
-      updated_at: user.updated_at,
-      // Specific fields from user_details join
-      opening_balance: user.opening_balance,
-      opening_balance_type: user.opening_balance_type,
-      rccm: user.rccm,
-      ifu: user.ifu,
-      credit_period: user.credit_period,
-      credit_limit: user.credit_limit,
-      // Assigned warehouses
-      assigned_warehouses: assignedWarehousesDetails,
-    };
-
-    console.log(
-      `[API GET /users/:id] Sending response for user ID: ${result.id}`
-    );
-    res.json(result);
-  } catch (error) {
-    console.error(
-      `[API GET /users/:id] Error processing request for ID ${req.params.id}:`,
-      error
-    );
+    res.json(user);
+  } catch (err) {
+    console.error(`[GET /api/users/:id] Error:`, err);
     res.status(500).json({
-      error:
-        "Erreur interne du serveur lors de la récupération de l'utilisateur",
-      details: error.message,
+      error: "Erreur serveur lors de la récupération de l'utilisateur.",
+      details: err.message,
     });
-  } finally {
-    // Ensure connection is always released
-    if (connection) {
-      console.log(
-        `[API GET /users/:id] Releasing connection for request ID: ${req.params.id}`
-      );
-      connection.release();
-    }
   }
 });
 
