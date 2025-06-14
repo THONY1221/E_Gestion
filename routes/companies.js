@@ -49,41 +49,62 @@ router.get("/", async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
-    const statusFilter = req.query.status; // "active" ou "inactive"
+    const statusFilter = req.query.status;
+    const userId = req.query.userId; // Ajout du filtre par utilisateur
 
-    // Construction dynamique de la requête en fonction du filtre
-    let query = "SELECT * FROM companies";
-    let countQuery = "SELECT COUNT(*) as count FROM companies";
+    let query = `
+      SELECT DISTINCT c.*
+      FROM companies c
+      LEFT JOIN user_warehouse uw ON c.id = uw.company_id
+      WHERE 1=1
+    `;
+    let countQuery = `
+      SELECT COUNT(DISTINCT c.id)
+      FROM companies c
+      LEFT JOIN user_warehouse uw ON c.id = uw.company_id
+      WHERE 1=1
+    `;
     const params = [];
-    if (statusFilter) {
-      query += " WHERE status = ?";
-      countQuery += " WHERE status = ?";
-      params.push(statusFilter);
+    let paramIndex = 1;
+
+    if (userId) {
+      query += ` AND uw.user_id = $${paramIndex}`;
+      countQuery += ` AND uw.user_id = $${paramIndex}`;
+      params.push(userId);
+      paramIndex++;
     }
 
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+    if (statusFilter) {
+      query += ` AND c.status = $${paramIndex}`;
+      countQuery += ` AND c.status = $${paramIndex}`;
+      params.push(statusFilter);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY c.created_at DESC LIMIT $${paramIndex} OFFSET $${
+      paramIndex + 1
+    }`;
     params.push(limit, offset);
 
-    // Exécution des requêtes
-    const [companies] = await db.query(query, params);
-    const [total] = await db.query(
+    const companiesResult = await db.query(query, params);
+    const totalResult = await db.query(
       countQuery,
-      statusFilter ? [statusFilter] : []
-    );
+      params.slice(0, paramIndex - 1)
+    ); // Exclure limit et offset pour le count
 
     res.json({
-      companies,
+      companies: companiesResult.rows,
       pagination: {
         currentPage: page,
-        totalPages: Math.ceil(total[0].count / limit),
-        totalItems: total[0].count,
+        totalPages: Math.ceil(parseInt(totalResult.rows[0].count) / limit),
+        totalItems: parseInt(totalResult.rows[0].count),
         itemsPerPage: limit,
       },
     });
   } catch (err) {
     console.error("Erreur lors de la récupération des entreprises:", err);
     res.status(500).json({
-      error: "Erreur lors de la récupération des entreprises",
+      error: "Erreur serveur lors de la récupération des entreprises",
       details: err.message,
     });
   }
@@ -92,17 +113,17 @@ router.get("/", async (req, res) => {
 // Récupérer une entreprise par ID
 router.get("/:id", async (req, res) => {
   try {
-    const [company] = await db.query("SELECT * FROM companies WHERE id = ?", [
+    const result = await db.query("SELECT * FROM companies WHERE id = $1", [
       req.params.id,
     ]);
-    if (company.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Entreprise non trouvée" });
     }
-    res.json(company[0]);
+    res.json(result.rows[0]);
   } catch (err) {
     console.error("Erreur lors de la récupération de l'entreprise:", err);
     res.status(500).json({
-      error: "Erreur lors de la récupération de l'entreprise",
+      error: "Erreur serveur lors de la récupération de l'entreprise",
       details: err.message,
     });
   }
@@ -126,18 +147,16 @@ router.post("/", logoFields, async (req, res) => {
       timezone = "UTC",
     } = req.body;
 
-    // Vérifier si l'email existe déjà
-    const [existing] = await db.query(
-      "SELECT id FROM companies WHERE email = ?",
+    const existingResult = await db.query(
+      "SELECT id FROM companies WHERE email = $1",
       [email]
     );
-    if (existing.length > 0) {
+    if (existingResult.rows.length > 0) {
       return res
         .status(400)
         .json({ error: "Une entreprise avec cet email existe déjà" });
     }
 
-    // Traitement des logos
     const logos = {};
     if (req.files) {
       Object.keys(req.files).forEach((key) => {
@@ -145,41 +164,44 @@ router.post("/", logoFields, async (req, res) => {
       });
     }
 
-    const [result] = await db.query(
-      `INSERT INTO companies (
+    const insertQuery = `
+      INSERT INTO companies (
         name, short_name, email, phone, website, address,
         light_logo, dark_logo, small_light_logo, small_dark_logo,
         currency_id, status, app_layout, rtl, auto_detect_timezone,
         timezone, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [
-        name,
-        short_name,
-        email,
-        phone,
-        website,
-        address,
-        logos.light_logo || null,
-        logos.dark_logo || null,
-        logos.small_light_logo || null,
-        logos.small_dark_logo || null,
-        currency_id,
-        status,
-        app_layout,
-        rtl,
-        auto_detect_timezone,
-        timezone,
-      ]
-    );
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
+      RETURNING id
+    `;
+    const insertParams = [
+      name,
+      short_name,
+      email,
+      phone,
+      website,
+      address,
+      logos.light_logo || null,
+      logos.dark_logo || null,
+      logos.small_light_logo || null,
+      logos.small_dark_logo || null,
+      currency_id,
+      status,
+      app_layout,
+      rtl,
+      auto_detect_timezone,
+      timezone,
+    ];
+
+    const result = await db.query(insertQuery, insertParams);
 
     res.status(201).json({
       message: "Entreprise créée avec succès",
-      id: result.insertId,
+      id: result.rows[0].id,
     });
   } catch (err) {
     console.error("Erreur lors de la création de l'entreprise:", err);
     res.status(500).json({
-      error: "Erreur lors de la création de l'entreprise",
+      error: "Erreur serveur lors de la création de l'entreprise",
       details: err.message,
     });
   }
@@ -204,25 +226,25 @@ router.put("/:id", logoFields, async (req, res) => {
       timezone,
     } = req.body;
 
-    // Vérifier l'existence de l'entreprise
-    const [existing] = await db.query("SELECT * FROM companies WHERE id = ?", [
-      id,
-    ]);
-    if (existing.length === 0) {
+    const existingResult = await db.query(
+      "SELECT * FROM companies WHERE id = $1",
+      [id]
+    );
+    if (existingResult.rows.length === 0) {
       return res.status(404).json({ error: "Entreprise non trouvée" });
     }
 
-    // Traitement des logos et suppression des anciens fichiers si nécessaire
+    const existingCompany = existingResult.rows[0];
     const logos = {};
     if (req.files) {
       Object.keys(req.files).forEach((key) => {
         logos[key] = `/uploads/logos/${req.files[key][0].filename}`;
-        if (existing[0][key]) {
+        if (existingCompany[key]) {
           const oldPath = path.join(
             __dirname,
             "..",
             "public",
-            existing[0][key]
+            existingCompany[key]
           );
           if (fs.existsSync(oldPath)) {
             fs.unlinkSync(oldPath);
@@ -231,7 +253,7 @@ router.put("/:id", logoFields, async (req, res) => {
       });
     }
 
-    const updates = {
+    const updateFields = {
       name,
       short_name,
       email,
@@ -244,30 +266,43 @@ router.put("/:id", logoFields, async (req, res) => {
       rtl,
       auto_detect_timezone,
       timezone,
-      updated_at: new Date(),
       ...logos,
     };
 
-    Object.keys(updates).forEach(
-      (key) => updates[key] === undefined && delete updates[key]
-    );
+    const queryParts = [];
+    const queryParams = [];
+    let paramIndex = 1;
 
-    const [result] = await db.query("UPDATE companies SET ? WHERE id = ?", [
-      updates,
-      id,
-    ]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Entreprise non trouvée" });
+    Object.entries(updateFields).forEach(([key, value]) => {
+      if (value !== undefined) {
+        queryParts.push(`${key} = $${paramIndex}`);
+        queryParams.push(value);
+        paramIndex++;
+      }
+    });
+
+    if (queryParts.length === 0) {
+      return res.status(400).json({ error: "Aucun champ à mettre à jour" });
     }
+
+    queryParams.push(id);
+    const updateQuery = `
+      UPDATE companies
+      SET ${queryParts.join(", ")}, updated_at = NOW()
+      WHERE id = $${paramIndex}
+      RETURNING *
+    `;
+
+    const result = await db.query(updateQuery, queryParams);
 
     res.json({
       message: "Entreprise mise à jour avec succès",
-      updates,
+      company: result.rows[0],
     });
   } catch (err) {
     console.error("Erreur lors de la mise à jour de l'entreprise:", err);
     res.status(500).json({
-      error: "Erreur lors de la mise à jour de l'entreprise",
+      error: "Erreur serveur lors de la mise à jour de l'entreprise",
       details: err.message,
     });
   }
@@ -275,68 +310,21 @@ router.put("/:id", logoFields, async (req, res) => {
 
 // Supprimer une entreprise
 router.delete("/:id", async (req, res) => {
-  const connection = await db.getConnection();
   try {
-    await connection.beginTransaction();
-    const { id } = req.params;
-    if (!id || isNaN(parseInt(id))) {
-      await connection.rollback();
-      return res.status(400).json({ error: "ID de l'entreprise invalide" });
-    }
-
-    // Verrouiller la ligne avec FOR UPDATE
-    const [company] = await connection.query(
-      "SELECT id, light_logo, dark_logo, small_light_logo, small_dark_logo FROM companies WHERE id = ? FOR UPDATE",
-      [id]
+    const result = await db.query(
+      "DELETE FROM companies WHERE id = $1 RETURNING *",
+      [req.params.id]
     );
-    if (company.length === 0) {
-      await connection.rollback();
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: "Entreprise non trouvée" });
     }
-
-    // Suppression des logos
-    const logoFields = [
-      "light_logo",
-      "dark_logo",
-      "small_light_logo",
-      "small_dark_logo",
-    ];
-    for (const field of logoFields) {
-      if (company[0][field]) {
-        const logoPath = path.join(
-          __dirname,
-          "..",
-          "public",
-          company[0][field]
-        );
-        if (fs.existsSync(logoPath)) {
-          fs.unlinkSync(logoPath);
-        }
-      }
-    }
-
-    const [result] = await connection.query(
-      "DELETE FROM companies WHERE id = ? AND id = ?",
-      [id, id]
-    );
-    if (result.affectedRows === 0) {
-      await connection.rollback();
-      return res
-        .status(400)
-        .json({ error: "La suppression de l'entreprise a échoué" });
-    }
-
-    await connection.commit();
-    res.json({ message: "Entreprise supprimée avec succès", deletedId: id });
+    res.status(200).json({ message: "Entreprise supprimée avec succès" });
   } catch (err) {
-    await connection.rollback();
     console.error("Erreur lors de la suppression de l'entreprise:", err);
     res.status(500).json({
-      error: "Erreur lors de la suppression de l'entreprise",
+      error: "Erreur serveur lors de la suppression de l'entreprise",
       details: err.message,
     });
-  } finally {
-    connection.release();
   }
 });
 
@@ -360,7 +348,7 @@ router.patch("/:id/status", async (req, res) => {
     }
 
     const [company] = await connection.query(
-      "SELECT id, status FROM companies WHERE id = ? FOR UPDATE",
+      "SELECT id, status FROM companies WHERE id = $1 FOR UPDATE",
       [id]
     );
     if (company.length === 0) {
@@ -369,7 +357,7 @@ router.patch("/:id/status", async (req, res) => {
     }
 
     const [result] = await connection.query(
-      "UPDATE companies SET status = ?, updated_at = NOW() WHERE id = ? AND id = ?",
+      "UPDATE companies SET status = $1, updated_at = NOW() WHERE id = $2 AND id = $3",
       [status, id, id]
     );
     if (result.affectedRows === 0) {
@@ -380,7 +368,7 @@ router.patch("/:id/status", async (req, res) => {
     }
 
     const [updatedCompany] = await connection.query(
-      "SELECT id, name, short_name, email, phone, status, updated_at FROM companies WHERE id = ?",
+      "SELECT id, name, short_name, email, phone, status, updated_at FROM companies WHERE id = $1",
       [id]
     );
     if (updatedCompany.length === 0) {
