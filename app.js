@@ -89,11 +89,7 @@ try {
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Configuration du moteur de template EJS
-app.set("view engine", "ejs");
-app.set("views", path.join(__dirname, "views"));
-
-// --- NOUVELLE ROUTE LOGIN ---
+// --- NOUVELLE ROUTE LOGIN (PostgreSQL compatible) ---
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -102,34 +98,29 @@ app.post("/api/login", async (req, res) => {
       .json({ message: "Email et mot de passe sont requis." });
   }
 
-  let connection;
   try {
-    connection = await db.getConnection(); // Obtenez une connexion depuis le pool
-
     // 1. Trouver l'utilisateur par email et inclure son rôle ET statut superadmin
-    const [users] = await connection.query(
+    const userResult = await db.query(
       `SELECT
-         u.id, u.name, u.email, u.password as hashedPassword, u.status,
-         u.company_id, u.role_id, u.is_superadmin, -- Added is_superadmin
+         u.id, u.name, u.email, u.password, u.status,
+         u.company_id, u.role_id, u.is_superadmin,
          r.name as role_name
        FROM users u
        LEFT JOIN roles r ON u.role_id = r.id
-       WHERE u.email = ?`,
+       WHERE u.email = $1`,
       [email]
     );
 
-    if (users.length === 0) {
-      connection.release(); // Release connection before sending response
+    if (userResult.rows.length === 0) {
       return res
         .status(401)
         .json({ message: "Email ou mot de passe incorrect." });
     }
 
-    const user = users[0];
+    const user = userResult.rows[0];
 
     // 2. Vérifier le statut de l'utilisateur
     if (user.status !== "enabled") {
-      connection.release(); // Release connection before sending response
       return res.status(403).json({
         message:
           "Votre compte est désactivé. Veuillez contacter l'administrateur.",
@@ -137,9 +128,8 @@ app.post("/api/login", async (req, res) => {
     }
 
     // 3. Comparer le mot de passe fourni avec le hash stocké
-    const match = await bcrypt.compare(password, user.hashedPassword);
+    const match = await bcrypt.compare(password, user.password);
     if (!match) {
-      connection.release(); // Release connection before sending response
       return res
         .status(401)
         .json({ message: "Email ou mot de passe incorrect." });
@@ -149,118 +139,83 @@ app.post("/api/login", async (req, res) => {
     let permissionKeys = [];
     let assignedWarehouses = [];
 
-    if (user.is_superadmin === 1) {
-      // SysAdmin: Get ALL permissions and ALL warehouses
+    if (user.is_superadmin) {
+      // boolean in pg, not 1/0
       console.log(
-        `User ${user.id} (${user.email}) is SysAdmin. Fetching all permissions and warehouses.`
+        `User ${user.id} (${user.email}) is SuperAdmin. Fetching all permissions and warehouses.`
       );
-
-      // Fetch all permission keys
-      const [allPermissions] = await connection.query(
-        "SELECT `key` FROM permissions ORDER BY `key` ASC"
+      const perms = await db.query(
+        "SELECT key FROM permissions ORDER BY key ASC"
       );
-      permissionKeys = allPermissions.map((p) => p.key);
-
-      // Fetch all warehouses with company details
-      const [allWarehouses] = await connection.query(`
-        SELECT 
-          w.id, 
-          w.name,
-          w.company_id,
-          c.name as company_name
-        FROM warehouses w
-        JOIN companies c ON w.company_id = c.id
-        -- Consider adding WHERE w.status = 'active' if applicable
-        ORDER BY c.name ASC, w.name ASC
-      `);
-      assignedWarehouses = allWarehouses;
+      permissionKeys = perms.rows.map((p) => p.key);
+      const wh = await db.query(`
+        SELECT w.id, w.name, w.company_id, c.name as company_name
+        FROM warehouses w JOIN companies c ON w.company_id = c.id
+        ORDER BY c.name ASC, w.name ASC`);
+      assignedWarehouses = wh.rows;
     } else {
-      // Regular User: Get permissions based on role and specific warehouses
       console.log(
         `User ${user.id} (${user.email}) is regular user. Fetching role permissions and assigned warehouses.`
       );
-
-      // Fetch role-based permissions
       if (user.role_id) {
-        const [rolePermissions] = await connection.query(
+        const rolePerms = await db.query(
           `SELECT p.key
            FROM permission_role pr
            JOIN permissions p ON pr.permission_id = p.id
-           WHERE pr.role_id = ?`,
+           WHERE pr.role_id = $1`,
           [user.role_id]
         );
-        permissionKeys = rolePermissions.map((p) => p.key);
+        permissionKeys = rolePerms.rows.map((p) => p.key);
       }
-
-      // Fetch assigned warehouses (assuming staff members use user_warehouse)
-      // Adjust this logic if non-staff users can also be assigned warehouses
-      const [userWarehouses] = await connection.query(
-        `
-        SELECT 
-          w.id, 
-          w.name,
-          w.company_id,
-          c.name as company_name
-        FROM user_warehouse uw
-        JOIN warehouses w ON uw.warehouse_id = w.id
-        JOIN companies c ON w.company_id = c.id
-        WHERE uw.user_id = ?
-        ORDER BY c.name ASC, w.name ASC
-      `,
+      const userWh = await db.query(
+        `SELECT w.id, w.name, w.company_id, c.name as company_name
+         FROM user_warehouse uw
+         JOIN warehouses w ON uw.warehouse_id = w.id
+         JOIN companies c ON w.company_id = c.id
+         WHERE uw.user_id = $1
+         ORDER BY c.name ASC, w.name ASC`,
         [user.id]
       );
-      assignedWarehouses = userWarehouses;
+      assignedWarehouses = userWh.rows;
     }
 
-    // 5. Préparer les données utilisateur à inclure DANS LE TOKEN (garder minimal)
+    // 5. Préparer les données utilisateur à inclure DANS LE TOKEN
     const userDataForToken = {
       id: user.id,
       email: user.email,
-      // Include role or is_superadmin if needed for middleware checks
       is_superadmin: user.is_superadmin,
-      // Avoid putting large arrays like permissions/warehouses in the token
     };
 
     // 6. Générer le token JWT
-    const JWT_SECRET = process.env.JWT_SECRET || "VOTRE_SECRET_TRES_SECRET"; // Utiliser variable d'environnement!
-    const token = jwt.sign(userDataForToken, JWT_SECRET, {
-      expiresIn: "1d", // Validité du token
-    });
+    const JWT_SECRET = process.env.JWT_SECRET || "VOTRE_SECRET_TRES_SECRET";
+    const token = jwt.sign(userDataForToken, JWT_SECRET, { expiresIn: "1d" });
 
-    // 7. Renvoyer le token et les informations utilisateur COMPLETES
+    // 7. Renvoyer le token et les informations utilisateur
     res.json({
       message: "Connexion réussie",
       token: token,
       user: {
-        // Include all necessary fields for the frontend context
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role_name, // Keep role name for display
-        is_superadmin: user.is_superadmin, // Send this flag to frontend
-        company_id: user.company_id, // Base company, might be less relevant for SysAdmin
+        role: user.role_name,
+        is_superadmin: user.is_superadmin,
+        company_id: user.company_id,
         status: user.status,
-        permissions: permissionKeys, // Full permissions list
-        assigned_warehouses: assignedWarehouses, // Full or specific warehouse list
+        permissions: permissionKeys,
+        assigned_warehouses: assignedWarehouses,
       },
     });
   } catch (error) {
     console.error("Erreur lors de la connexion:", error);
-    res
-      .status(500)
-      .json({ message: "Erreur serveur lors de la tentative de connexion." });
-  } finally {
-    if (connection) {
-      connection.release(); // Assurez-vous que la connexion est toujours libérée
-    }
+    res.status(500).json({
+      message: "Erreur interne du serveur lors de la tentative de connexion.",
+      details: error.message,
+    });
   }
 });
-// --- FIN NOUVELLE ROUTE LOGIN ---
 
-// Route publique de vérification (sans authentification)
-app.use("/verify", verificationRoutes);
-
-// Définition des routes API
+// Utilisation des routes
 app.use("/api/produits", produitsRoutes);
 app.use("/api/warehouses", warehouseRoutes);
 app.use("/api/categories", categoriesRoutes);
@@ -278,43 +233,22 @@ app.use("/api/stock-adjustments", stockAdjustmentsRoutes);
 app.use("/api/production", productionRoutes);
 app.use("/api/expenses", expensesRoutes);
 app.use("/api/stock-history", stockHistoryRoutes);
-app.use("/api", rolesPermissionsRouter);
-app.use("/api", userPermissionsRoutes);
-// Utilisation du nouveau routeur dashboard
+app.use("/api/roles-permissions", rolesPermissionsRouter);
+app.use("/api/user-permissions", userPermissionsRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/verification", verificationRoutes);
 
-// Fichiers statiques
-app.use("/uploads/image_produits", express.static("uploads/image_produits"));
-app.use("/uploads/logos", express.static("uploads/logos"));
-app.use("/uploads/category_images", express.static("uploads/category_images"));
-app.use("/uploads/warehouses", express.static("uploads/warehouses"));
-app.use(
-  "/uploads/profiles",
-  express.static(path.join(__dirname, "uploads/profiles"))
-);
+// --- FIN DES ROUTES API ---
 
-// Route alternative pour accéder aux logos d'entrepôts directement
-app.use("/warehouses", express.static("uploads/warehouses"));
-
-// Servir les fichiers statiques React (build de production)
-app.use(express.static(path.join(__dirname, "build")));
-
-// Gérer toutes les routes non-API en servant index.html (pour SPA React Router)
-app.get("*", (req, res) => {
-  // Ne pas intercepter les routes API et uploads
-  if (
-    req.path.startsWith("/api/") ||
-    req.path.startsWith("/uploads/") ||
-    req.path.startsWith("/warehouses/")
-  ) {
-    return res.status(404).json({ message: "Route non trouvée" });
-  }
-
-  // Pour toutes les autres routes, servir index.html pour permettre à React Router de prendre le relais
-  res.sendFile(path.join(__dirname, "build", "index.html"));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`
+  
+  ////////////////////////////////////////////////
+  ==> Serveur démarré et à l'écoute sur le port ${PORT}
+  ////////////////////////////////////////////////
+  
+  `);
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Serveur démarré et à l'écoute sur le port ${PORT}`);
-});
+module.exports = app;
