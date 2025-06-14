@@ -1,15 +1,23 @@
-const mysql = require("mysql2");
+const { Pool } = require("pg");
 require("dotenv").config();
 
-// Configuration de la base de données avec variables d'environnement
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "GestionCommerciale",
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+// Configuration de la base de données PostgreSQL pour Render
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-module.exports = pool.promise();
+pool.on("connect", () => {
+  console.log("✅ Connexion à la base de données PostgreSQL réussie.");
+});
+
+pool.on("error", (err) => {
+  console.error(
+    "❌ Erreur de connexion à la base de données PostgreSQL:",
+    err.stack
+  );
+});
+
+module.exports = pool;
