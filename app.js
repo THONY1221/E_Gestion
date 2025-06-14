@@ -316,5 +316,5 @@ app.get("*", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Votre Serveur a démarré sur http://localhost:${PORT}`);
+  console.log(`✅ Serveur démarré et à l'écoute sur le port ${PORT}`);
 });
